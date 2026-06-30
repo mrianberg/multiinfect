@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Infection Tag</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #0d0d1a; color: #eee;
+    font-family: 'Arial Black', Impact, sans-serif;
+    display: flex; flex-direction: column; align-items: center;
+    justify-content: center; min-height: 100vh; overflow: hidden;
+    user-select: none;
+  }
+  h1 {
+    font-size: 64px; color: #33ff33; text-shadow: 3px 3px 0 #000;
+    text-transform: uppercase; font-style: italic; margin-bottom: 8px;
+    text-align: center;
+  }
+  .subtitle { font-size: 18px; color: #888; margin-bottom: 50px; text-align: center; }
+
+  /* --- Name input --- */
+  #name-section { display: flex; gap: 10px; margin-bottom: 40px; }
+  #name-section input {
+    background: rgba(255,255,255,0.07); border: 2px solid #444;
+    color: #fff; font-size: 18px; font-family: inherit;
+    padding: 10px 18px; border-radius: 6px; outline: none; width: 220px;
+  }
+  #name-section input:focus { border-color: #33ff33; }
+  #name-section button {
+    background: #33ff33; color: #000; border: none; cursor: pointer;
+    font-family: inherit; font-size: 16px; padding: 10px 20px; border-radius: 6px;
+    font-weight: bold;
+  }
+  #name-section button:hover { background: #55ff55; }
+
+  /* --- Main menu --- */
+  #main-menu { display: flex; gap: 24px; flex-wrap: wrap; justify-content: center; }
+  .big-btn {
+    background: rgba(255,255,255,0.05); border: 3px solid #444;
+    border-radius: 12px; padding: 36px 48px; cursor: pointer;
+    transition: border-color 0.2s, background 0.2s; text-align: center;
+    min-width: 220px;
+  }
+  .big-btn:hover { border-color: #33ff33; background: rgba(51,255,51,0.08); }
+  .big-btn .icon { font-size: 48px; display: block; margin-bottom: 12px; }
+  .big-btn .label { font-size: 22px; color: #fff; }
+  .big-btn .desc { font-size: 13px; color: #777; margin-top: 6px; font-style: italic; }
+
+  /* --- Room browser --- */
+  #room-browser { display: none; width: 560px; max-width: 95vw; }
+  #room-browser h2 { font-size: 28px; color: #33ff33; margin-bottom: 16px; }
+  #room-list {
+    background: rgba(0,0,0,0.4); border: 2px solid #333; border-radius: 8px;
+    min-height: 180px; max-height: 300px; overflow-y: auto; margin-bottom: 16px;
+  }
+  .room-item {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 14px 18px; border-bottom: 1px solid #222; cursor: pointer;
+    transition: background 0.15s;
+  }
+  .room-item:last-child { border-bottom: none; }
+  .room-item:hover { background: rgba(51,255,51,0.08); }
+  .room-item .room-name { font-size: 17px; color: #eee; }
+  .room-item .room-host { font-size: 13px; color: #888; margin-top: 3px; }
+  .room-item .room-count {
+    font-size: 20px; color: #33ff33; font-style: italic; white-space: nowrap;
+  }
+  .empty-rooms { text-align: center; padding: 40px; color: #555; font-size: 16px; font-style: italic; }
+
+  .btn-row { display: flex; gap: 12px; }
+  .btn {
+    flex: 1; padding: 14px; font-family: inherit; font-size: 16px;
+    border-radius: 8px; border: none; cursor: pointer; font-weight: bold;
+  }
+  .btn-green { background: #33ff33; color: #000; }
+  .btn-green:hover { background: #55ff55; }
+  .btn-gray { background: #333; color: #ccc; }
+  .btn-gray:hover { background: #444; }
+
+  /* --- Pre-game lobby --- */
+  #pregame-lobby { display: none; width: 560px; max-width: 95vw; }
+  #pregame-lobby h2 { font-size: 28px; color: #33ff33; margin-bottom: 4px; }
+  #room-code-display { font-size: 13px; color: #666; margin-bottom: 16px; }
+  #player-list {
+    background: rgba(0,0,0,0.4); border: 2px solid #333; border-radius: 8px;
+    min-height: 120px; max-height: 320px; overflow-y: auto; margin-bottom: 16px;
+  }
+  .player-row {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 12px 18px; border-bottom: 1px solid #222;
+  }
+  .player-row:last-child { border-bottom: none; }
+  .player-row .pname { font-size: 17px; }
+  .player-row .pbadge { font-size: 12px; padding: 3px 8px; border-radius: 4px; }
+  .badge-host { background: #ffcc00; color: #000; }
+  .badge-ready { background: #33ff33; color: #000; }
+  .badge-waiting { background: #444; color: #aaa; }
+
+  #lobby-actions { display: flex; gap: 12px; flex-direction: column; }
+  #start-btn { display: none; }
+
+  #status-msg { text-align: center; color: #888; font-size: 15px; margin-top: 10px; font-style: italic; }
+
+  /* scrollbar */
+  ::-webkit-scrollbar { width: 6px; }
+  ::-webkit-scrollbar-track { background: #111; }
+  ::-webkit-scrollbar-thumb { background: #333; border-radius: 3px; }
+</style>
+</head>
+<body>
+
+<h1>Infection Tag</h1>
+<p class="subtitle">THE STORM UPDATE</p>
+
+<!-- Step 1: Name -->
+<div id="name-section">
+  <input id="name-input" type="text" placeholder="Your name..." maxlength="20" value="">
+  <button id="name-confirm-btn">Join</button>
+</div>
+
+<!-- Step 2: Mode select -->
+<div id="main-menu" style="display:none">
+  <div class="big-btn" id="solo-btn">
+    <span class="icon">🤖</span>
+    <div class="label">SOLO MATCH</div>
+    <div class="desc">Play vs. bots</div>
+  </div>
+  <div class="big-btn" id="mp-btn">
+    <span class="icon">👥</span>
+    <div class="label">PLAY WITH FRIENDS</div>
+    <div class="desc">Real players + bots</div>
+  </div>
+</div>
+
+<!-- Step 3a: Room browser -->
+<div id="room-browser">
+  <h2>GAME ROOMS</h2>
+  <div id="room-list"><div class="empty-rooms">No open rooms. Host one!</div></div>
+  <div class="btn-row">
+    <button class="btn btn-green" id="host-btn">HOST A GAME</button>
+    <button class="btn btn-gray" id="back-from-browser-btn">BACK</button>
+  </div>
+</div>
+
+<!-- Step 3b: Pre-game lobby -->
+<div id="pregame-lobby">
+  <h2 id="lobby-room-name">Room Name</h2>
+  <div id="room-code-display"></div>
+  <div id="player-list"></div>
+  <div id="lobby-actions">
+    <button class="btn btn-green" id="ready-btn">READY UP</button>
+    <button class="btn btn-green" id="start-btn">START GAME</button>
+    <button class="btn btn-gray" id="leave-btn">LEAVE ROOM</button>
+  </div>
+  <div id="status-msg"></div>
+</div>
+
+<script src="/socket.io/socket.io.js"></script>
+<script>
+const socket = io();
+
+let myName = '';
+let myRoomId = null;
+let myHostId = null;
+let isReady = false;
+let players = {}; // id → player data
+
+// --- Sections ---
+const nameSection = document.getElementById('name-section');
+const mainMenu = document.getElementById('main-menu');
+const roomBrowser = document.getElementById('room-browser');
+const pregameLobby = document.getElementById('pregame-lobby');
+
+function showOnly(el) {
+  [nameSection, mainMenu, roomBrowser, pregameLobby].forEach(e => e.style.display = 'none');
+  el.style.display = el === mainMenu ? 'flex' : 'block';
+}
+
+// --- Name ---
+document.getElementById('name-input').addEventListener('keydown', e => {
+  if (e.key === 'Enter') confirmName();
+});
+document.getElementById('name-confirm-btn').addEventListener('click', confirmName);
+
+function confirmName() {
+  const val = document.getElementById('name-input').value.trim();
+  if (!val) return;
+  myName = val;
+  socket.emit('set_name', myName);
+  showOnly(mainMenu);
+}
+
+// --- Main menu ---
+document.getElementById('solo-btn').addEventListener('click', () => {
+  window.location.href = 'game.html?mode=solo';
+});
+
+document.getElementById('mp-btn').addEventListener('click', () => {
+  if (!myName) { showOnly(nameSection); return; }
+  socket.emit('get_rooms');
+  showOnly(roomBrowser);
+});
+
+// --- Room browser ---
+document.getElementById('back-from-browser-btn').addEventListener('click', () => showOnly(mainMenu));
+
+document.getElementById('host-btn').addEventListener('click', () => {
+  const roomName = myName + "'s Game";
+  socket.emit('create_room', roomName, (res) => {
+    if (!res.ok) return alert(res.error);
+    myRoomId = res.roomId;
+    myHostId = socket.id;
+    players = {};
+    players[socket.id] = { id: socket.id, name: myName, isHost: true, ready: false };
+    enterLobby(roomName, res.roomId);
+  });
+});
+
+socket.on('room_list', (list) => {
+  const container = document.getElementById('room-list');
+  if (list.length === 0) {
+    container.innerHTML = '<div class="empty-rooms">No open rooms. Host one!</div>';
+    return;
+  }
+  container.innerHTML = '';
+  list.forEach(room => {
+    const div = document.createElement('div');
+    div.className = 'room-item';
+    div.innerHTML = `
+      <div>
+        <div class="room-name">${escHtml(room.name)}</div>
+        <div class="room-host">Hosted by ${escHtml(room.hostName)}</div>
+      </div>
+      <div class="room-count">${room.playerCount} 👤</div>
+    `;
+    div.addEventListener('click', () => joinRoom(room.id));
+    container.appendChild(div);
+  });
+});
+
+function joinRoom(roomId) {
+  socket.emit('join_room', roomId, (res) => {
+    if (!res.ok) return alert(res.error);
+    myRoomId = res.roomId;
+    myHostId = res.hostId;
+    players = {};
+    res.players.forEach(p => { players[p.id] = p; });
+    const room = document.getElementById('lobby-room-name'); // will be overwritten
+    enterLobby(players[myHostId]?.name + "'s Game", roomId);
+  });
+}
+
+// --- Pre-game lobby ---
+function enterLobby(roomName, roomId) {
+  document.getElementById('lobby-room-name').innerText = roomName;
+  document.getElementById('room-code-display').innerText = `Room ID: ${roomId}`;
+  document.getElementById('start-btn').style.display = socket.id === myHostId ? 'block' : 'none';
+  document.getElementById('ready-btn').style.display = socket.id === myHostId ? 'none' : 'block';
+  isReady = false;
+  renderPlayerList();
+  showOnly(pregameLobby);
+}
+
+function renderPlayerList() {
+  const container = document.getElementById('player-list');
+  container.innerHTML = '';
+  Object.values(players).forEach(p => {
+    const div = document.createElement('div');
+    div.className = 'player-row';
+    let badge = '';
+    if (p.id === myHostId) badge = '<span class="pbadge badge-host">HOST</span>';
+    else if (p.ready) badge = '<span class="pbadge badge-ready">READY</span>';
+    else badge = '<span class="pbadge badge-waiting">WAITING</span>';
+    div.innerHTML = `<span class="pname">${escHtml(p.name)}${p.id === socket.id ? ' (you)' : ''}</span>${badge}`;
+    container.appendChild(div);
+  });
+
+  const isHost = socket.id === myHostId;
+  const allReady = Object.values(players).filter(p => p.id !== myHostId).every(p => p.ready);
+  document.getElementById('status-msg').innerText = isHost
+    ? (allReady ? 'All players ready! You can start.' : 'Waiting for players to ready up...')
+    : (isReady ? 'Waiting for host to start...' : 'Click Ready Up when you\'re set!');
+}
+
+document.getElementById('ready-btn').addEventListener('click', () => {
+  isReady = !isReady;
+  socket.emit('player_ready', isReady);
+  document.getElementById('ready-btn').innerText = isReady ? 'UNREADY' : 'READY UP';
+  document.getElementById('ready-btn').style.background = isReady ? '#888' : '#33ff33';
+  if (players[socket.id]) players[socket.id].ready = isReady;
+  renderPlayerList();
+});
+
+document.getElementById('start-btn').addEventListener('click', () => {
+  socket.emit('start_game');
+});
+
+document.getElementById('leave-btn').addEventListener('click', () => {
+  myRoomId = null; myHostId = null; players = {};
+  socket.emit('get_rooms');
+  showOnly(mainMenu);
+});
+
+// --- Socket events ---
+socket.on('player_joined', (p) => {
+  players[p.id] = { ...p, ready: false };
+  renderPlayerList();
+});
+
+socket.on('player_left', ({ id }) => {
+  delete players[id];
+  renderPlayerList();
+});
+
+socket.on('ready_update', ({ id, ready }) => {
+  if (players[id]) players[id].ready = ready;
+  renderPlayerList();
+});
+
+socket.on('new_host', ({ id }) => {
+  myHostId = id;
+  if (id === socket.id) {
+    document.getElementById('start-btn').style.display = 'block';
+    document.getElementById('ready-btn').style.display = 'none';
+  }
+  if (players[id]) players[id].isHost = true;
+  renderPlayerList();
+});
+
+socket.on('game_start', () => {
+  window.location.href = `game.html?mode=multi&room=${myRoomId}&name=${encodeURIComponent(myName)}`;
+});
+
+// Refresh room list periodically while browsing
+setInterval(() => {
+  if (roomBrowser.style.display !== 'none') socket.emit('get_rooms');
+}, 3000);
+
+function escHtml(str) {
+  return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+</script>
+</body>
+</html>

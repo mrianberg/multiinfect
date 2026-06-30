@@ -1,0 +1,1092 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Infection Tag - The Storm Update</title>
+<style>
+    body { margin: 0; overflow: hidden; background-color: #1a1a2e; user-select: none; }
+    #loading-screen {
+        position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+        background-color: #0d0d1a; z-index: 300;
+        display: flex; flex-direction: column; justify-content: center; align-items: center;
+        color: #eee; font-family: 'Arial Black', Impact, sans-serif;
+    }
+    #loading-title { font-size: 55px; color: #33ff33; margin-bottom: 20px; text-shadow: 2px 2px 0px #000; text-align: center; font-style: italic; }
+    #loading-bar-container { width: 50%; height: 25px; background: rgba(255,255,255,0.1); border: 3px solid #fff; border-radius: 5px; overflow: hidden;}
+    #loading-bar { width: 0%; height: 100%; background: #33ff33; transition: width 0.1s ease; }
+    #loading-text { margin-top: 15px; font-size: 20px; font-style: italic; color: #aaa;}
+    #top-ui {
+        position: absolute; top: 20px; width: 100%; text-align: center;
+        font-size: 45px; color: white; font-family: 'Arial Black', sans-serif;
+        text-shadow: 3px 3px 0 #000; z-index: 100; pointer-events: none;
+    }
+    #phase-alert {
+        position: absolute; top: 80px; width: 100%; text-align: center;
+        font-size: 30px; color: #ffcc00; font-family: 'Arial Black', sans-serif;
+        text-shadow: 2px 2px 0 #000; z-index: 100; pointer-events: none; display: none;
+    }
+    #ui-container {
+        position: absolute; bottom: 30px; width: 100%;
+        display: flex; justify-content: space-between; align-items: flex-end;
+        padding: 0 40px; box-sizing: border-box;
+        font-family: 'Arial Black', sans-serif; font-style: italic;
+        color: white; text-shadow: 3px 3px 0px #000;
+        z-index: 100; pointer-events: none;
+    }
+    .ui-element { background: rgba(0, 0, 0, 0.6); padding: 15px 30px; border-radius: 8px; border-bottom: 5px solid #ff3333; font-size: 35px; }
+    #status-box { color: #ff3333; }
+    #survivors-box { color: #ffffff; border-bottom-color: #aaaaaa; }
+    #radar {
+        position: absolute; top: 20px; right: 20px; width: 160px; height: 160px;
+        background: rgba(0, 0, 0, 0.6); border: 3px solid rgba(255, 255, 255, 0.4);
+        border-radius: 50%; z-index: 100; pointer-events: none; overflow: hidden;
+    }
+    #killfeed {
+        position: absolute; top: 20px; left: 40px;
+        font-size: 18px; font-family: 'Arial', sans-serif; font-weight: bold; color: white;
+        text-shadow: 1px 1px 2px #000; display: flex; flex-direction: column; gap: 5px;
+    }
+    #damage-overlay {
+        position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+        background-color: rgba(34, 255, 34, 0.5); pointer-events: none;
+        opacity: 0; transition: opacity 0.3s ease-out; z-index: 50;
+    }
+    #blocker {
+        position: absolute; width: 100%; height: 100%;
+        background-color: rgba(10,10,10,0.85); z-index: 200;
+        display: none;
+        flex-direction: column; justify-content: center; align-items: center;
+        color: white; font-family: 'Arial Black', sans-serif; cursor: pointer;
+        transition: background-color 0.5s ease;
+    }
+    h1 { font-size: 70px; margin: 0; text-shadow: 3px 3px 0px #000; color: #33ff33; text-align: center; text-transform: uppercase;}
+    p { font-size: 22px; text-align: center; color: #ccc;}
+    #victory { display: none; font-size: 60px; text-shadow: 3px 3px 0px #000; margin-bottom: 20px;}
+    #back-to-lobby {
+        display: none; margin-top: 20px; padding: 12px 32px;
+        background: #33ff33; color: #000; border: none; cursor: pointer;
+        font-family: 'Arial Black', sans-serif; font-size: 20px; border-radius: 8px;
+    }
+    #back-to-lobby:hover { background: #55ff55; }
+</style>
+<script src="js/three.min.js"></script>
+<script src="js/PointerLockControls.js"></script>
+<script src="js/BufferGeometryUtils.js"></script>
+</head>
+<body>
+<div id="loading-screen">
+    <div id="loading-title">GENERATING MASSIVE ISLAND</div>
+    <div id="loading-bar-container"><div id="loading-bar"></div></div>
+    <div id="loading-text">Initializing...</div>
+</div>
+
+<div id="damage-overlay"></div>
+<div id="blocker" style="display: flex;">
+    <div id="victory">GAME OVER</div>
+    <h1 id="game-title">INFECTION TAG</h1>
+    <p id="instructions">Click to Deploy<br><br>(WASD: Glide/Run | SPACE: Jump | E: Mount Horse)<br><br>Beware the Storm.</p>
+    <button id="back-to-lobby" onclick="window.location.href='lobby.html'">BACK TO LOBBY</button>
+</div>
+
+<div id="top-ui">TIME: <span id="timer">05:00</span></div>
+<div id="phase-alert" style="display: none;">INFECTION IN: 0</div>
+<canvas id="radar" width="160" height="160"></canvas>
+<div id="killfeed"></div>
+
+<div id="ui-container">
+    <div class="ui-element" id="status-box">STATUS: <span id="status-text">SURVIVOR</span></div>
+    <div class="ui-element" id="survivors-box">SURVIVORS: <span id="survivors-count">--</span></div>
+</div>
+
+<script src="/socket.io/socket.io.js"></script>
+<script>
+// ─── URL params ───────────────────────────────────────────────────────────────
+const urlParams = new URLSearchParams(window.location.search);
+const GAME_MODE = urlParams.get('mode') || 'solo'; // 'solo' | 'multi'
+const ROOM_ID   = urlParams.get('room') || null;
+const MY_NAME   = urlParams.get('name') || 'Player';
+
+// ─── Multiplayer setup ────────────────────────────────────────────────────────
+let socket = null;
+let mpPlayers = {}; // id → { mesh, isInfected, isGliding, landed, gliderRef }
+
+if (GAME_MODE === 'multi') {
+    socket = io();
+    socket.emit('set_name', MY_NAME);
+}
+
+// ─── Three.js scene ───────────────────────────────────────────────────────────
+const scene = new THREE.Scene();
+const dayColor = new THREE.Color(0x5588cc);
+const nightColor = new THREE.Color(0x1a1a2e);
+scene.background = dayColor.clone();
+scene.fog = new THREE.FogExp2(dayColor.clone(), 0.0008);
+
+const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 8000);
+camera.position.set(0, 1500, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: false });
+renderer.setSize(window.innerWidth, window.innerHeight);
+document.body.appendChild(renderer.domElement);
+
+const ambientLight = new THREE.AmbientLight(0xffffff, 0.4);
+scene.add(ambientLight);
+const dirLight = new THREE.DirectionalLight(0xffeedd, 0.6);
+dirLight.position.set(200, 1000, -100);
+scene.add(dirLight);
+
+// ─── Game state ───────────────────────────────────────────────────────────────
+let gamePhase = 'dropping';
+let phaseTimer = 0;
+let nightFadeProgress = 0;
+let stormCenter = new THREE.Vector3(0, 0, 0);
+let stormRadius = 4000;
+
+const stormGeo = new THREE.CylinderGeometry(1, 1, 2000, 64, 1, true);
+const stormMat = new THREE.MeshBasicMaterial({ color: 0x8800ff, transparent: true, opacity: 0.25, side: THREE.BackSide, depthWrite: false });
+const stormMesh = new THREE.Mesh(stormGeo, stormMat);
+stormMesh.position.y = 500;
+scene.add(stormMesh);
+stormMesh.visible = false;
+
+function getTerrainHeight(x, z) {
+    const hill1 = Math.sin(x * 0.0025) * Math.cos(z * 0.0025) * 60;
+    const hill2 = Math.sin(x * 0.0075) * Math.cos(z * 0.0075) * 20;
+    return hill1 + hill2;
+}
+
+function getTerrainNormal(x, z) {
+    const eps = 1.0;
+    const slopeX = (getTerrainHeight(x + eps, z) - getTerrainHeight(x - eps, z)) / (2 * eps);
+    const slopeZ = (getTerrainHeight(x, z + eps) - getTerrainHeight(x, z - eps)) / (2 * eps);
+    return new THREE.Vector3(-slopeX, 1, -slopeZ).normalize();
+}
+
+let floor;
+const globalColliders = [];
+const globalWaypoints = [];
+
+function addCollider(w, h, d, x, y, z) {
+    const box = new THREE.Box3(
+        new THREE.Vector3(x - w/2, y - h/2, z - d/2),
+        new THREE.Vector3(x + w/2, y + h/2, z + d/2)
+    );
+    box.centerX = x; box.centerZ = z;
+    globalColliders.push(box);
+}
+
+const _tempColBox = new THREE.Box3();
+const _tempMinVec = new THREE.Vector3();
+const _tempMaxVec = new THREE.Vector3();
+const STEP_HEIGHT = 6;
+
+function checkCollision(pos, bufferSize = 3, isPlayer = false) {
+    const baseY = (isPlayer ? pos.y - 12 : pos.y) + STEP_HEIGHT;
+    const height = (isPlayer ? 12 : 18) - STEP_HEIGHT;
+    _tempMinVec.set(pos.x - bufferSize, baseY, pos.z - bufferSize);
+    _tempMaxVec.set(pos.x + bufferSize, baseY + height, pos.z + bufferSize);
+    _tempColBox.set(_tempMinVec, _tempMaxVec);
+    for (let i = 0; i < globalColliders.length; i++) {
+        const col = globalColliders[i];
+        const dx = pos.x - col.centerX; const dz = pos.z - col.centerZ;
+        if (dx * dx + dz * dz > 3600) continue;
+        if (_tempColBox.intersectsBox(col)) return true;
+    }
+    return false;
+}
+
+function getFloorHeight(x, z, currentFeetY, radius = 3) {
+    let floorY = getTerrainHeight(x, z);
+    for (let i = 0; i < globalColliders.length; i++) {
+        const col = globalColliders[i];
+        const dx = x - col.centerX; const dz = z - col.centerZ;
+        if (dx * dx + dz * dz > 3600) continue;
+        if (x + radius > col.min.x && x - radius < col.max.x && z + radius > col.min.z && z - radius < col.max.z) {
+            if (col.max.y <= currentFeetY + STEP_HEIGHT && col.max.y > floorY) floorY = col.max.y;
+        }
+    }
+    return floorY;
+}
+
+function checkEnvCollision(x, z, radius) {
+    _tempMinVec.set(x - radius, -50, z - radius); _tempMaxVec.set(x + radius, 100, z + radius);
+    _tempColBox.set(_tempMinVec, _tempMaxVec);
+    for (let i = 0; i < globalColliders.length; i++) {
+        const col = globalColliders[i];
+        const dx = x - col.centerX; const dz = z - col.centerZ;
+        if (dx * dx + dz * dz > 6400) continue;
+        if (_tempColBox.intersectsBox(col)) return true;
+    }
+    return false;
+}
+
+const buildings = []; const buildingMeshes = []; const treeMeshes = []; const crates = []; const horses = []; const bots = []; const barricades = [];
+let cachedEnvObstacles = []; let cachedRayObsOnly = [];
+
+function getSafeSpawnPos() {
+    let pos = new THREE.Vector3(); let isSafe = false; let attempts = 0;
+    while (!isSafe && attempts < 500) {
+        pos.x = (Math.random() - 0.5) * 3200; pos.z = (Math.random() - 0.5) * 3200;
+        pos.y = getTerrainHeight(pos.x, pos.z);
+        if (!checkEnvCollision(pos.x, pos.z, 20)) isSafe = true;
+        attempts++;
+    }
+    return pos;
+}
+
+const gliderGeo = new THREE.ConeGeometry(12, 4, 4); gliderGeo.rotateY(Math.PI / 4); gliderGeo.rotateX(-Math.PI / 8);
+const gliderMat = new THREE.MeshLambertMaterial({ color: 0xffaa00, side: THREE.DoubleSide });
+const playerGlider = new THREE.Mesh(gliderGeo, gliderMat);
+scene.add(playerGlider); playerGlider.visible = false;
+
+function createMergedBotGeometry() {
+    const body = new THREE.BoxGeometry(4, 6, 4); body.translate(0, 8, 0);
+    const legs = new THREE.BoxGeometry(3.8, 5, 3.8); legs.translate(0, 2.5, 0);
+    const head = new THREE.BoxGeometry(3.5, 3.5, 3.5); head.translate(0, 12.75, 0);
+    const hat = new THREE.BoxGeometry(3.8, 2, 3.8); hat.translate(0, 15.5, 0);
+    body.groups.forEach(g => g.materialIndex = 0); legs.groups.forEach(g => g.materialIndex = 1);
+    head.groups.forEach(g => g.materialIndex = 2); hat.groups.forEach(g => g.materialIndex = 3);
+    return THREE.BufferGeometryUtils.mergeBufferGeometries([body, legs, head, hat], true);
+}
+
+let sharedBotGeometry;
+const survivorMaterial = new THREE.MeshLambertMaterial({ color: 0xff3333 });
+const infectedMaterial = new THREE.MeshLambertMaterial({ color: 0x33ff33 });
+const baseMaterials = [
+    survivorMaterial.clone(),
+    new THREE.MeshLambertMaterial({ color: 0x222222 }),
+    new THREE.MeshLambertMaterial({ color: 0xffccaa }),
+    new THREE.MeshLambertMaterial({ color: 0x111111 })
+];
+
+// Materials for real multiplayer players (blue tint to distinguish from bots)
+const mpSurvivorMat = new THREE.MeshLambertMaterial({ color: 0x3366ff });
+const mpInfectedMat = new THREE.MeshLambertMaterial({ color: 0x33ff33 });
+const mpBaseMaterials = [
+    mpSurvivorMat.clone(),
+    new THREE.MeshLambertMaterial({ color: 0x113366 }),
+    new THREE.MeshLambertMaterial({ color: 0xaaccff }),
+    new THREE.MeshLambertMaterial({ color: 0x001133 })
+];
+
+function spawnBot(x, z) {
+    const bot = new THREE.Group();
+    bot.isInfected = false; bot.isGliding = true; bot.landed = false;
+    bot.thinkTimer = performance.now() + Math.random() * 2000; bot.whiskerTimer = 0;
+    bot.velocityY = 0; bot.isJumping = false; bot.mount = null; bot.hideout = null;
+    bot.idleMode = 'wander'; bot.wanderDir = new THREE.Vector3((Math.random()-0.5)*2, 0, (Math.random()-0.5)*2).normalize();
+    bot.targetPos = null;
+    const botMaterials = baseMaterials.map(m => m.clone());
+    const visualMesh = new THREE.Mesh(sharedBotGeometry, botMaterials);
+    bot.add(visualMesh); bot.visualMesh = visualMesh;
+    const botGlider = new THREE.Mesh(gliderGeo, gliderMat);
+    botGlider.position.set(0, 20, 0); bot.add(botGlider); bot.gliderRef = botGlider;
+    bot.position.set(x, 1500 + Math.random() * 500, z);
+    bot.rotation.y = Math.random() * Math.PI * 2;
+    scene.add(bot); bots.push(bot);
+}
+
+// ─── Multiplayer player mesh management ──────────────────────────────────────
+function createMpPlayerMesh(isInfected) {
+    const group = new THREE.Group();
+    const mats = mpBaseMaterials.map(m => m.clone());
+    if (isInfected) mats[0].copy(mpInfectedMat);
+    const visualMesh = new THREE.Mesh(sharedBotGeometry, mats);
+    group.add(visualMesh);
+    group.visualMesh = visualMesh;
+    const glider = new THREE.Mesh(gliderGeo, gliderMat);
+    glider.position.set(0, 20, 0);
+    group.add(glider);
+    group.gliderRef = glider;
+    scene.add(group);
+    return group;
+}
+
+function getOrCreateMpMesh(id) {
+    if (!mpPlayers[id]) {
+        mpPlayers[id] = { mesh: null, isInfected: false, isGliding: true, landed: false };
+    }
+    if (!mpPlayers[id].mesh && sharedBotGeometry) {
+        mpPlayers[id].mesh = createMpPlayerMesh(mpPlayers[id].isInfected);
+    }
+    return mpPlayers[id];
+}
+
+// ─── Building functions ───────────────────────────────────────────────────────
+function spawnTallTower(cx, cz) {
+    const py = getTerrainHeight(cx, cz) - 15;
+    const matStone = new THREE.MeshLambertMaterial({ color: 0x5a5a5a });
+    const matWood = new THREE.MeshLambertMaterial({ color: 0x3d2817 });
+    const stoneGeos = []; const woodGeos = [];
+    const addB = (w, h, d, x, y, z, isWood) => {
+        const g = new THREE.BoxGeometry(w, h, d); g.translate(cx + x, py + y, cz + z);
+        if (isWood) woodGeos.push(g); else stoneGeos.push(g);
+        addCollider(w, h, d, cx + x, py + y, cz + z);
+    };
+    const s = 60; const h = 180;
+    addB(10, h+30, 10, -25, h/2-15, -25, false); addB(10, h+30, 10, 25, h/2-15, -25, false);
+    addB(10, h+30, 10, -25, h/2-15, 25, false); addB(10, h+30, 10, 25, h/2-15, 25, false);
+    for (let floorNum = 1; floorNum <= 5; floorNum++) {
+        let yLvl = 24 * floorNum;
+        globalWaypoints.push(new THREE.Vector3(cx - 20, py + yLvl, cz - 20));
+        globalWaypoints.push(new THREE.Vector3(cx + 20, py + yLvl, cz + 20));
+        if (floorNum === 5) {
+            addB(s, 2, s, 0, yLvl, 0, true);
+            addB(s+10, 4, s+10, 0, yLvl+8, 0, false);
+        } else {
+            addB(s, 2, 16, 0, yLvl, -22, true); addB(s, 2, 16, 0, yLvl, 22, true);
+            addB(16, 2, s-32, -22, yLvl, 0, true); addB(16, 2, s-32, 22, yLvl, 0, true);
+        }
+        if (floorNum < 5) {
+            for (let i = 0; i < 8; i++) { let y = (yLvl-24)+2+(i*(12/8)); addB(16,4,16,-22,y,-22+(i*5.5),true); }
+            for (let i = 0; i < 8; i++) { let y = (yLvl-12)+2+(i*(12/8)); addB(16,4,16,-22+(i*5.5),y,22,true); }
+        }
+    }
+    if (stoneGeos.length > 0) { scene.add(new THREE.Mesh(THREE.BufferGeometryUtils.mergeBufferGeometries(stoneGeos), matStone)); }
+    if (woodGeos.length > 0) { scene.add(new THREE.Mesh(THREE.BufferGeometryUtils.mergeBufferGeometries(woodGeos), matWood)); }
+    buildings.push({ position: new THREE.Vector3(cx, py, cz) });
+}
+
+// ─── Loading queue ────────────────────────────────────────────────────────────
+const loadingQueue = []; let totalTasks = 0; let completedTasks = 0;
+function addTask(name, func) { loadingQueue.push({ name, func }); totalTasks++; }
+
+addTask("Sculpting Massive Terrain", () => {
+    const floorGeo = new THREE.PlaneGeometry(7000, 7000, 200, 200); floorGeo.rotateX(-Math.PI / 2);
+    const posAttr = floorGeo.attributes.position;
+    for (let i = 0; i < posAttr.count; i++) {
+        const vx = posAttr.getX(i); const vz = posAttr.getZ(i); posAttr.setY(i, getTerrainHeight(vx, vz));
+    }
+    floorGeo.computeVertexNormals();
+    floor = new THREE.Mesh(floorGeo, new THREE.MeshStandardMaterial({ color: 0x243020, roughness: 0.9 }));
+    scene.add(floor); sharedBotGeometry = createMergedBotGeometry();
+});
+
+addTask("Erecting Watchtowers", () => {
+    for (let i = 0; i < 15; i++) {
+        let attempts = 0;
+        while (attempts < 100) {
+            const cx = (Math.random()-0.5)*4000; const cz = (Math.random()-0.5)*4000;
+            if (!checkEnvCollision(cx, cz, 60)) { spawnTallTower(cx, cz); break; }
+            attempts++;
+        }
+    }
+});
+
+for (let c = 0; c < 2; c++) {
+    addTask(`Constructing Cabins ${c+1}/2`, () => {
+        const wallGeos = [];
+        const createWall = (w, h, d, x, y, z) => { const geo = new THREE.BoxGeometry(w, h, d); geo.translate(x, y, z); wallGeos.push(geo); };
+        createWall(3,30,60,-24,15,0); createWall(3,30,60,24,15,0);
+        createWall(18,30,3,-16,15,29); createWall(18,30,3,16,15,29);
+        createWall(14,10,3,0,25,29); createWall(18,30,3,-16,15,-29);
+        createWall(18,30,3,16,15,-29); createWall(14,10,3,0,25,-29);
+        const houseMerged = THREE.BufferGeometryUtils.mergeBufferGeometries(wallGeos);
+        const houseMat = new THREE.MeshLambertMaterial({ color: 0x555555 });
+        const roofGeo = new THREE.ConeGeometry(45, 25, 4); roofGeo.rotateY(Math.PI / 4);
+        const roofMat = new THREE.MeshLambertMaterial({ color: 0x222222 });
+        for (let i = 0; i < 12; i++) {
+            let attempts = 0;
+            while (attempts < 100) {
+                const px = (Math.random()-0.5)*3200; const pz = (Math.random()-0.5)*3200;
+                if (!checkEnvCollision(px, pz, 40)) {
+                    const isRotated = Math.random() > 0.5;
+                    const bGroup = new THREE.Group(); const py = getTerrainHeight(px, pz) - 2;
+                    bGroup.position.set(px, py, pz);
+                    bGroup.quaternion.setFromUnitVectors(new THREE.Vector3(0,1,0), getTerrainNormal(px, pz));
+                    if (isRotated) bGroup.rotateOnAxis(new THREE.Vector3(0,1,0), Math.PI/2);
+                    const houseMesh = new THREE.Mesh(houseMerged, houseMat);
+                    const roofMesh = new THREE.Mesh(roofGeo, roofMat); roofMesh.position.y = 42.5;
+                    bGroup.add(houseMesh); bGroup.add(roofMesh); scene.add(bGroup);
+                    buildings.push(bGroup); buildingMeshes.push(houseMesh, roofMesh);
+                    const addWallCol = (w, h, d, rx, ry, rz) => {
+                        if (isRotated) addCollider(d,h,w,px+rz,py+ry,pz-rx);
+                        else addCollider(w,h,d,px+rx,py+ry,pz+rz);
+                    };
+                    addWallCol(3,30,60,-24,15,0); addWallCol(3,30,60,24,15,0);
+                    addWallCol(18,30,3,-16,15,29); addWallCol(18,30,3,16,15,29);
+                    addWallCol(18,30,3,-16,15,-29); addWallCol(18,30,3,16,15,-29);
+                    addWallCol(14,10,3,0,25,29); addWallCol(14,10,3,0,25,-29);
+                    break;
+                }
+                attempts++;
+            }
+        }
+    });
+}
+
+for (let c = 0; c < 2; c++) {
+    addTask(`Planting Dense Woods ${c+1}/2`, () => {
+        const treeTrunkGeo = new THREE.CylinderGeometry(3.0, 4.0, 35, 6);
+        const treeLeavesGeo = new THREE.ConeGeometry(22, 60, 6);
+        const trunkMat = new THREE.MeshLambertMaterial({ color: 0x221811 });
+        const leavesMat = new THREE.MeshLambertMaterial({ color: 0x112b1a });
+        for (let i = 0; i < 100; i++) {
+            let attempts = 0;
+            while (attempts < 100) {
+                const tx = (Math.random()-0.5)*4400; const tz = (Math.random()-0.5)*4400;
+                if (!checkEnvCollision(tx, tz, 10)) {
+                    const ty = getTerrainHeight(tx, tz);
+                    const trunk = new THREE.Mesh(treeTrunkGeo, trunkMat); trunk.position.set(tx, ty+17.5, tz);
+                    const leaves = new THREE.Mesh(treeLeavesGeo, leavesMat); leaves.position.set(tx, ty+50, tz);
+                    scene.add(trunk); scene.add(leaves); treeMeshes.push(trunk, leaves);
+                    addCollider(6, 35, 6, tx, ty+17.5, tz); break;
+                }
+                attempts++;
+            }
+        }
+    });
+}
+
+addTask("Spawning Horses", () => {
+    const horseGeoBody = new THREE.BoxGeometry(4.5, 6, 12); horseGeoBody.translate(0, 9, 0);
+    const horseGeoHead = new THREE.BoxGeometry(2, 5, 4); horseGeoHead.translate(0, 14, 5.5);
+    const horseGeoLegs1 = new THREE.BoxGeometry(1.5, 6, 1.5); horseGeoLegs1.translate(-1.5, 3, 4);
+    const horseGeoLegs2 = new THREE.BoxGeometry(1.5, 6, 1.5); horseGeoLegs2.translate(1.5, 3, 4);
+    const plainHorseMerged = THREE.BufferGeometryUtils.mergeBufferGeometries([horseGeoBody, horseGeoHead, horseGeoLegs1, horseGeoLegs2]);
+    for (let i = 0; i < 25; i++) {
+        let safePos = getSafeSpawnPos();
+        const horse = new THREE.Group();
+        const mesh = new THREE.Mesh(plainHorseMerged, new THREE.MeshLambertMaterial({color: 0x333333}));
+        horse.add(mesh); horse.rider = null; horse.wanderDir = new THREE.Vector3(); horse.wanderTimer = 0;
+        horse.position.set(safePos.x, getTerrainHeight(safePos.x, safePos.z), safePos.z);
+        scene.add(horse); horses.push(horse);
+    }
+});
+
+// In multiplayer, spawn fewer bots (bots fill remaining slots up to 40)
+const BOT_COUNT = GAME_MODE === 'multi' ? 10 : 40;
+const botsPerTask = Math.ceil(BOT_COUNT / 4);
+for (let c = 0; c < 4; c++) {
+    addTask(`Loading Battle Bus ${c+1}/4`, () => {
+        const count = (c < 3) ? botsPerTask : (BOT_COUNT - botsPerTask * 3);
+        for (let i = 0; i < count; i++) { let p = getSafeSpawnPos(); spawnBot(p.x, p.z); }
+    });
+}
+
+// ─── Game logic ───────────────────────────────────────────────────────────────
+let timeRemaining = 300;
+let survivorsLeft = 0;
+let playerIsInfected = false;
+let isVictory = false;
+let playerMountedHorse = null;
+let playerIsGliding = true;
+let playerLanded = false;
+
+function countRealSurvivors() {
+    if (GAME_MODE !== 'multi') return 0;
+    return Object.values(mpPlayers).filter(p => !p.isInfected).length;
+}
+
+function updateSurvivorsDisplay() {
+    const total = survivorsLeft + (GAME_MODE === 'multi' ? countRealSurvivors() : 0);
+    document.getElementById('survivors-count').innerText = survivorsLeft;
+}
+
+function processLoadingTasks() {
+    if (loadingQueue.length === 0) {
+        cachedRayObsOnly = [...crates, ...buildingMeshes, ...treeMeshes, ...barricades];
+        cachedEnvObstacles = [...cachedRayObsOnly, floor];
+
+        // Create mp player meshes now that sharedBotGeometry exists
+        if (GAME_MODE === 'multi') {
+            Object.keys(mpPlayers).forEach(id => getOrCreateMpMesh(id));
+        }
+
+        let safeStart = getSafeSpawnPos();
+        camera.position.set(safeStart.x, 2000, safeStart.z);
+        playerGlider.visible = true;
+
+        survivorsLeft = bots.length + 1 + (GAME_MODE === 'multi' ? Object.keys(mpPlayers).length : 0);
+        document.getElementById('survivors-count').innerText = survivorsLeft;
+
+        document.getElementById('loading-screen').style.display = 'none';
+        document.getElementById('blocker').style.display = 'flex';
+        document.getElementById('phase-alert').style.display = 'block';
+
+        prevTime = performance.now();
+        animate();
+        return;
+    }
+
+    const currentTask = loadingQueue.shift();
+    document.getElementById('loading-text').innerText = currentTask.name + "...";
+    requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+            currentTask.func(); completedTasks++;
+            document.getElementById('loading-bar').style.width = ((completedTasks / totalTasks) * 100) + '%';
+            processLoadingTasks();
+        });
+    });
+}
+
+const playerHitbox = new THREE.Mesh(new THREE.BoxGeometry(6, 12, 6), new THREE.MeshBasicMaterial({visible: false}));
+scene.add(playerHitbox); playerHitbox.isPlayer = true;
+
+let killCount = 0;
+function logFeed(msg, color) {
+    killCount++; if (killCount > 6) return;
+    const feed = document.getElementById('killfeed'); const item = document.createElement('div');
+    item.innerText = msg; item.style.color = color; feed.appendChild(item);
+    setTimeout(() => { item.remove(); killCount--; }, 4000);
+}
+
+function triggerFirstInfection() {
+    gamePhase = 'active';
+    document.getElementById('phase-alert').style.display = 'none';
+    stormCenter.set((Math.random()-0.5)*2000, 0, (Math.random()-0.5)*2000);
+    stormMesh.visible = true;
+
+    let pool = [...bots];
+    if (!playerIsInfected) pool.push('player');
+    if (GAME_MODE === 'multi') {
+        Object.keys(mpPlayers).forEach(id => pool.push({ mpId: id }));
+    }
+
+    for (let i = 0; i < Math.min(2, pool.length); i++) {
+        let r = Math.floor(Math.random() * pool.length);
+        let target = pool.splice(r, 1)[0];
+        if (target === 'player') infectPlayer("THE VIRUS");
+        else if (target && target.mpId) {
+            // Infect remote player locally (server will also broadcast)
+            if (mpPlayers[target.mpId]) mpPlayers[target.mpId].isInfected = true;
+            survivorsLeft--;
+            document.getElementById('survivors-count').innerText = survivorsLeft;
+            logFeed(`A player was infected by THE VIRUS!`, "#33ff33");
+        } else {
+            infectBot(target, "THE VIRUS");
+        }
+    }
+
+    setInterval(() => {
+        if (gamePhase !== 'active' || isVictory) return;
+        timeRemaining--;
+        let m = Math.floor(timeRemaining / 60); let s = timeRemaining % 60;
+        document.getElementById('timer').innerText = `${m<10?'0':''}${m}:${s<10?'0':''}${s}`;
+        if (timeRemaining <= 0) checkWinCondition();
+    }, 1000);
+}
+
+function checkWinCondition() {
+    if (isVictory || gamePhase !== 'active') return;
+    if (survivorsLeft <= 0) {
+        isVictory = true; controls.unlock();
+        document.getElementById('victory').innerText = "INFECTION WINS!";
+        document.getElementById('victory').style.color = "#33ff33";
+        document.getElementById('victory').style.display = "block";
+        document.getElementById('back-to-lobby').style.display = "block";
+        document.getElementById('blocker').style.display = "flex";
+        if (GAME_MODE === 'multi' && socket) socket.emit('game_over', { result: 'infection' });
+    } else if (timeRemaining <= 0) {
+        isVictory = true; controls.unlock();
+        document.getElementById('victory').innerText = "SURVIVORS WIN!";
+        document.getElementById('victory').style.color = "#ff3333";
+        document.getElementById('victory').style.display = "block";
+        document.getElementById('back-to-lobby').style.display = "block";
+        document.getElementById('blocker').style.display = "flex";
+        if (GAME_MODE === 'multi' && socket) socket.emit('game_over', { result: 'survivors' });
+    }
+}
+
+function infectBot(bot, infectorName) {
+    if (bot.isInfected) return;
+    bot.isInfected = true; bot.visualMesh.material[0].copy(infectedMaterial);
+    survivorsLeft--; document.getElementById('survivors-count').innerText = survivorsLeft;
+    logFeed(`${infectorName} infected a Survivor!`, "#33ff33"); checkWinCondition();
+}
+
+function infectPlayer(infectorName) {
+    if (playerIsInfected) return;
+    playerIsInfected = true; survivorsLeft--;
+    document.getElementById('survivors-count').innerText = survivorsLeft;
+    logFeed(`YOU were infected by ${infectorName}!`, "#33ff33");
+    document.getElementById('status-text').innerText = "INFECTED";
+    document.getElementById('status-box').style.color = "#33ff33";
+    document.getElementById('status-box').style.borderBottomColor = "#33ff33";
+    const overlay = document.getElementById('damage-overlay');
+    overlay.style.opacity = 1; setTimeout(() => overlay.style.opacity = 0, 800);
+    if (GAME_MODE === 'multi' && socket) socket.emit('i_infected', { byName: infectorName });
+    checkWinCondition();
+}
+
+function infectMpPlayer(targetId, byName) {
+    const p = mpPlayers[targetId];
+    if (!p || p.isInfected) return;
+    p.isInfected = true;
+    if (p.mesh) p.mesh.visualMesh.material[0].copy(mpInfectedMat);
+    survivorsLeft--; document.getElementById('survivors-count').innerText = survivorsLeft;
+    logFeed(`${byName} infected a Player!`, "#33ff33"); checkWinCondition();
+}
+
+// ─── Storm ────────────────────────────────────────────────────────────────────
+function applyStormPush(position, delta, isPlayer) {
+    let distToCenter = Math.sqrt(Math.pow(position.x - stormCenter.x, 2) + Math.pow(position.z - stormCenter.z, 2));
+    if (distToCenter > stormRadius) {
+        let pushDir = new THREE.Vector3(stormCenter.x - position.x, 0, stormCenter.z - position.z).normalize();
+        let pushSpeed = 150 * delta;
+        let origX = position.x; let origZ = position.z;
+        position.x += pushDir.x * pushSpeed; position.z += pushDir.z * pushSpeed;
+        if (checkCollision(position, 3, isPlayer)) {
+            position.x = origX; position.z = origZ;
+            if (isPlayer) playerVelocityY = 0;
+            position.y += 200 * delta; return true;
+        }
+    }
+    return false;
+}
+
+// ─── Horses ───────────────────────────────────────────────────────────────────
+function updateHorses(delta, time) {
+    horses.forEach(horse => {
+        if (horse.rider === 'player') {
+            horse.position.copy(camera.position); horse.position.y -= 22;
+            const camDir = new THREE.Vector3(0,0,-1).applyQuaternion(camera.quaternion);
+            horse.rotation.y = Math.atan2(camDir.x, camDir.z);
+        } else if (horse.rider && horse.rider !== 'player') {
+            horse.position.copy(horse.rider.position); horse.rotation.y = horse.rider.rotation.y;
+        } else {
+            if (time > horse.wanderTimer) {
+                horse.wanderTimer = time + 2000 + Math.random() * 3000;
+                horse.wanderDir.set((Math.random()-0.5)*2, 0, (Math.random()-0.5)*2);
+                if (horse.wanderDir.lengthSq() > 0) horse.wanderDir.normalize(); else horse.wanderDir.set(1,0,0);
+            }
+            if (gamePhase === 'active') {
+                let hDist = Math.sqrt(Math.pow(horse.position.x - stormCenter.x, 2) + Math.pow(horse.position.z - stormCenter.z, 2));
+                if (hDist > stormRadius - 200) {
+                    horse.wanderDir.set(stormCenter.x - horse.position.x, 0, stormCenter.z - horse.position.z).normalize();
+                    horse.wanderTimer = time + 2000;
+                }
+            }
+            const speed = 8 * delta;
+            horse.position.x += horse.wanderDir.x * speed; horse.position.z += horse.wanderDir.z * speed;
+            if (horse.wanderDir.lengthSq() > 0.1) horse.rotation.y = Math.atan2(horse.wanderDir.x, horse.wanderDir.z);
+            if (gamePhase === 'active') applyStormPush(horse.position, delta, false);
+        }
+        if (horse.rider !== 'player') {
+            const currentFeetY = horse.position.y;
+            let isFloating = (gamePhase === 'active') ? (Math.sqrt(Math.pow(horse.position.x - stormCenter.x, 2) + Math.pow(horse.position.z - stormCenter.z, 2)) > stormRadius && checkCollision(horse.position, 3, false)) : false;
+            if (!isFloating) horse.position.y = getFloorHeight(horse.position.x, horse.position.z, currentFeetY, 6);
+        }
+    });
+}
+
+// ─── Radar ────────────────────────────────────────────────────────────────────
+const radarCanvas = document.getElementById('radar');
+const radarCtx = radarCanvas.getContext('2d');
+const RADAR_RANGE = 800;
+
+function updateRadar() {
+    radarCtx.clearRect(0, 0, 160, 160);
+    const scale = 80 / RADAR_RANGE;
+    radarCtx.save();
+    radarCtx.beginPath(); radarCtx.arc(80, 80, 80, 0, Math.PI * 2); radarCtx.clip();
+    if (gamePhase === 'active') {
+        const sDx = stormCenter.x - camera.position.x; const sDz = stormCenter.z - camera.position.z;
+        radarCtx.fillStyle = 'rgba(136, 0, 255, 0.4)'; radarCtx.fillRect(0, 0, 160, 160);
+        radarCtx.globalCompositeOperation = 'destination-out';
+        radarCtx.beginPath(); radarCtx.arc(80 + sDx * scale, 80 + sDz * scale, Math.max(0, stormRadius * scale), 0, Math.PI * 2); radarCtx.fill();
+        radarCtx.globalCompositeOperation = 'source-over';
+        radarCtx.strokeStyle = '#8800ff'; radarCtx.lineWidth = 2; radarCtx.stroke();
+    }
+    radarCtx.fillStyle = playerIsInfected ? '#33ff33' : '#ff3333';
+    radarCtx.beginPath(); radarCtx.arc(80, 80, 5, 0, Math.PI * 2); radarCtx.fill();
+    bots.forEach(bot => {
+        const dx = bot.position.x - camera.position.x; const dz = bot.position.z - camera.position.z;
+        if (dx * dx + dz * dz < RADAR_RANGE * RADAR_RANGE && bot.isInfected === playerIsInfected) {
+            radarCtx.fillStyle = bot.isInfected ? '#33ff33' : '#ff3333';
+            radarCtx.beginPath(); radarCtx.arc(80 + dx * scale, 80 + dz * scale, 3, 0, Math.PI * 2); radarCtx.fill();
+        }
+    });
+    // Real players on radar (shown as white dots)
+    if (GAME_MODE === 'multi') {
+        Object.values(mpPlayers).forEach(p => {
+            if (!p.mesh) return;
+            const dx = p.mesh.position.x - camera.position.x; const dz = p.mesh.position.z - camera.position.z;
+            if (dx * dx + dz * dz < RADAR_RANGE * RADAR_RANGE) {
+                radarCtx.fillStyle = p.isInfected ? '#33ff33' : '#aaaaff';
+                radarCtx.beginPath(); radarCtx.arc(80 + dx * scale, 80 + dz * scale, 4, 0, Math.PI * 2); radarCtx.fill();
+            }
+        });
+    }
+    radarCtx.restore();
+}
+
+// ─── Controls ─────────────────────────────────────────────────────────────────
+const controls = new THREE.PointerLockControls(camera, document.body);
+const blocker = document.getElementById('blocker');
+blocker.addEventListener('click', () => { if (!isVictory) controls.lock(); });
+controls.addEventListener('lock', () => { blocker.style.display = 'none'; });
+controls.addEventListener('unlock', () => {
+    if (!isVictory) blocker.style.display = 'flex';
+});
+
+const keys = { w: false, a: false, s: false, d: false, space: false };
+document.addEventListener('keydown', (e) => {
+    if (e.code === 'KeyW' || e.code === 'ArrowUp') keys.w = true;
+    if (e.code === 'KeyA' || e.code === 'ArrowLeft') keys.a = true;
+    if (e.code === 'KeyS' || e.code === 'ArrowDown') keys.s = true;
+    if (e.code === 'KeyD' || e.code === 'ArrowRight') keys.d = true;
+    if (e.code === 'Space') keys.space = true;
+    if (e.code === 'KeyE' && controls.isLocked && !isVictory && !playerIsGliding && gamePhase === 'active') {
+        if (playerMountedHorse) { playerMountedHorse.rider = null; playerMountedHorse = null; }
+        else {
+            let nearest = null; let minDistSq = 1200;
+            horses.forEach(h => { if (!h.rider) { let dSq = camera.position.distanceToSquared(h.position); if (dSq < minDistSq) { minDistSq = dSq; nearest = h; } } });
+            if (nearest) { playerMountedHorse = nearest; nearest.rider = 'player'; }
+        }
+    }
+});
+document.addEventListener('keyup', (e) => {
+    if (e.code === 'KeyW' || e.code === 'ArrowUp') keys.w = false;
+    if (e.code === 'KeyA' || e.code === 'ArrowLeft') keys.a = false;
+    if (e.code === 'KeyS' || e.code === 'ArrowDown') keys.s = false;
+    if (e.code === 'KeyD' || e.code === 'ArrowRight') keys.d = false;
+    if (e.code === 'Space') keys.space = false;
+});
+
+// ─── Bot AI ───────────────────────────────────────────────────────────────────
+const raycaster = new THREE.Raycaster();
+const smoothTurnDummy = new THREE.Object3D();
+
+function smoothLookAt(bot, targetPos, turnSpeed, delta) {
+    if (!targetPos || isNaN(targetPos.x) || bot.position.distanceToSquared(targetPos) < 0.1) return;
+    smoothTurnDummy.position.copy(bot.position); smoothTurnDummy.lookAt(targetPos.x, bot.position.y, targetPos.z);
+    bot.quaternion.slerp(smoothTurnDummy.quaternion, delta * turnSpeed);
+}
+
+function updateBots(delta, time) {
+    let totalLanded = playerLanded ? 1 : 0;
+    for (let i = 0; i < bots.length; i++) { if (bots[i].landed) totalLanded++; }
+    if (GAME_MODE === 'multi') {
+        Object.values(mpPlayers).forEach(p => { if (p.landed) totalLanded++; });
+    }
+
+    if (gamePhase === 'active') {
+        for (let i = 0; i < bots.length; i++) {
+            let b1 = bots[i];
+            if (!b1.landed || !playerLanded) continue;
+            // Bot vs player contact
+            let dxP = b1.position.x - camera.position.x;
+            let dzP = b1.position.z - camera.position.z;
+            let playerFeetY = playerMountedHorse ? camera.position.y - 22 : camera.position.y - 12;
+            let dyP = b1.position.y - playerFeetY;
+            if (dxP*dxP + dyP*dyP + dzP*dzP < 180) {
+                if (b1.isInfected && !playerIsInfected) infectPlayer("Infected Horde");
+                else if (!b1.isInfected && playerIsInfected) infectBot(b1, "YOU");
+            }
+            // Bot vs bot contact
+            if (b1.isInfected) {
+                for (let j = 0; j < bots.length; j++) {
+                    let b2 = bots[j];
+                    if (!b2.isInfected && b1.position.distanceToSquared(b2.position) < 75) infectBot(b2, "Infected Horde");
+                }
+            }
+            // Bot vs real multiplayer players
+            if (GAME_MODE === 'multi' && socket) {
+                Object.entries(mpPlayers).forEach(([id, p]) => {
+                    if (!p.mesh || !p.landed) return;
+                    if (b1.isInfected && !p.isInfected && b1.position.distanceToSquared(p.mesh.position) < 180) {
+                        // Only the bot's client emits; server relays
+                        socket.emit('infect', id);
+                    }
+                });
+            }
+        }
+    }
+
+    if (gamePhase === 'dropping' && totalLanded >= (bots.length + (GAME_MODE === 'multi' ? Object.keys(mpPlayers).length : 0) + 1) * 0.8) {
+        gamePhase = 'countdown'; phaseTimer = time + 10000;
+    } else if (gamePhase === 'countdown') {
+        let secondsLeft = Math.ceil((phaseTimer - time) / 1000);
+        document.getElementById('phase-alert').innerText = `INFECTION IN: ${secondsLeft}`;
+        if (time > phaseTimer) triggerFirstInfection();
+    }
+
+    let botsThinkingThisFrame = 0;
+    bots.forEach(bot => {
+        const currentFeetY = bot.position.y;
+        const targetFloorY = getFloorHeight(bot.position.x, bot.position.z, currentFeetY);
+        if (bot.isGliding) {
+            bot.position.y -= 80 * delta;
+            bot.position.x += bot.wanderDir.x * 30 * delta; bot.position.z += bot.wanderDir.z * 30 * delta;
+            if (Math.random() < 0.05) { let centerDir = new THREE.Vector3(-bot.position.x, 0, -bot.position.z).normalize(); bot.wanderDir.lerp(centerDir, 0.2).normalize(); }
+            bot.rotation.y = Math.atan2(bot.wanderDir.x, bot.wanderDir.z);
+            if (bot.position.y <= targetFloorY) { bot.position.y = targetFloorY; bot.isGliding = false; bot.landed = true; bot.gliderRef.visible = false; }
+            return;
+        }
+        if (!bot.mount && Math.random() < 0.005 && gamePhase === 'active') {
+            let nearestH = null; let minHDistSq = 625;
+            horses.forEach(h => { if (!h.rider && bot.position.distanceToSquared(h.position) < minHDistSq) nearestH = h; });
+            if (nearestH) { bot.mount = nearestH; nearestH.rider = bot; bot.visualMesh.position.y = 10; }
+        }
+        if (time > bot.thinkTimer) {
+            if (botsThinkingThisFrame >= 5) { bot.thinkTimer = time + 30 + Math.random() * 30; }
+            else {
+                botsThinkingThisFrame++; bot.thinkTimer = time + 200 + Math.random() * 300;
+                let nearestStairNode = null; let minNodeDist = 100000;
+                if (Math.random() < 0.4) {
+                    for (let w of globalWaypoints) {
+                        let d = bot.position.distanceToSquared(w);
+                        if (d < minNodeDist && d < 60000 && w.y > bot.position.y + 5 && w.y < bot.position.y + 40) { minNodeDist = d; nearestStairNode = w; }
+                    }
+                }
+                if (nearestStairNode) { bot.targetPos = nearestStairNode.clone(); bot.hideout = null; }
+                else if (bot.isInfected) {
+                    bot.hideout = null;
+                    let visibleTargetPos = null; const botEye = bot.position.clone().add(new THREE.Vector3(0, 10, 0));
+                    let potentialTargets = [];
+                    bots.forEach(other => { if (!other.isInfected) potentialTargets.push({ pos: other.position, isPlayer: false }); });
+                    if (!playerIsInfected) potentialTargets.push({ pos: camera.position, isPlayer: true });
+                    if (GAME_MODE === 'multi') {
+                        Object.values(mpPlayers).forEach(p => { if (!p.isInfected && p.mesh) potentialTargets.push({ pos: p.mesh.position, isPlayer: false }); });
+                    }
+                    potentialTargets.forEach(t => { t.distSq = bot.position.distanceToSquared(t.pos); });
+                    potentialTargets.sort((a, b) => a.distSq - b.distSq);
+                    for (let i = 0; i < Math.min(3, potentialTargets.length); i++) {
+                        let pt = potentialTargets[i]; let dist = Math.sqrt(pt.distSq);
+                        let targetEye = pt.isPlayer ? pt.pos.clone() : pt.pos.clone().add(new THREE.Vector3(0, 10, 0));
+                        let dirToTarget = new THREE.Vector3().subVectors(targetEye, botEye).normalize();
+                        raycaster.set(botEye, dirToTarget); const blocks = raycaster.intersectObjects(cachedEnvObstacles);
+                        if (blocks.length === 0 || blocks[0].distance > dist - 5) { visibleTargetPos = pt.pos.clone(); break; }
+                    }
+                    if (visibleTargetPos) {
+                        bot.targetPos = visibleTargetPos;
+                        bots.forEach(other => { if (other.isInfected && other !== bot && other.position.distanceToSquared(bot.position) < 40000) { if (!other.targetPos || Math.random() < 0.2) other.targetPos = visibleTargetPos.clone(); } });
+                    } else {
+                        if (Math.random() < 0.1) bot.wanderDir.set((Math.random()-0.5)*2, 0, (Math.random()-0.5)*2).normalize();
+                        bot.targetPos = bot.position.clone().add(bot.wanderDir.clone().multiplyScalar(50));
+                    }
+                } else {
+                    let dangerVector = new THREE.Vector3(); let infectedCount = 0;
+                    bots.forEach(other => {
+                        if (other.isInfected) {
+                            let dSq = bot.position.distanceToSquared(other.position);
+                            if (dSq < 90000) { let away = new THREE.Vector3().subVectors(bot.position, other.position); dangerVector.add(away.normalize().multiplyScalar(1 / Math.max(1, Math.sqrt(dSq)))); infectedCount++; }
+                        }
+                    });
+                    if (playerIsInfected) {
+                        let dSq = bot.position.distanceToSquared(camera.position);
+                        if (dSq < 90000) { let away = new THREE.Vector3().subVectors(bot.position, camera.position); dangerVector.add(away.normalize().multiplyScalar(1 / Math.max(1, Math.sqrt(dSq)))); infectedCount++; }
+                    }
+                    if (infectedCount > 0) {
+                        bot.hideout = null;
+                        dangerVector.setY(0);
+                        if (dangerVector.lengthSq() > 0.0001) bot.targetPos = bot.position.clone().add(dangerVector.normalize().multiplyScalar(100));
+                    } else {
+                        if (!bot.hideout && Math.random() < 0.3) {
+                            let nearestB = null; let minB = Infinity;
+                            buildings.forEach(b => { let d = bot.position.distanceToSquared(b.position || b.position); if (d < minB) { minB = d; nearestB = b; } });
+                            if (nearestB) bot.hideout = (nearestB.position || nearestB).clone();
+                        }
+                        if (bot.hideout) {
+                            bot.targetPos = bot.hideout;
+                            if (bot.position.distanceToSquared(bot.hideout) < 200) bot.targetPos = bot.position;
+                        } else {
+                            if (Math.random() < 0.1) bot.wanderDir.set((Math.random()-0.5)*2, 0, (Math.random()-0.5)*2).normalize();
+                            bot.targetPos = bot.position.clone().add(bot.wanderDir.clone().multiplyScalar(50));
+                        }
+                    }
+                }
+            }
+        }
+        if (gamePhase === 'active' && bot.landed) {
+            let distToCenter = Math.sqrt(Math.pow(bot.position.x - stormCenter.x, 2) + Math.pow(bot.position.z - stormCenter.z, 2));
+            if (distToCenter > stormRadius - 250) {
+                let dirToCenter = new THREE.Vector3(stormCenter.x - bot.position.x, 0, stormCenter.z - bot.position.z).normalize();
+                bot.targetPos = bot.position.clone().add(dirToCenter.multiplyScalar(150)); bot.hideout = null;
+            }
+        }
+        let speed = (bot.isInfected ? 28 : 34) * delta; if (bot.mount) speed *= 1.5;
+        let moveTarget = bot.targetPos ? bot.targetPos.clone() : bot.position.clone().add(new THREE.Vector3(1,0,0));
+        let dist2D = Math.sqrt(Math.pow(bot.position.x - moveTarget.x, 2) + Math.pow(bot.position.z - moveTarget.z, 2));
+        if (dist2D < 30 && moveTarget.y > bot.position.y + 15) {
+            if (Math.random() < 0.1) bot.wanderDir.set((Math.random()-0.5)*2, 0, (Math.random()-0.5)*2).normalize();
+            moveTarget = bot.position.clone().add(bot.wanderDir.clone().multiplyScalar(40));
+        }
+        smoothLookAt(bot, moveTarget, 10, delta);
+        const dir = new THREE.Vector3(0, 0, 1).applyQuaternion(bot.quaternion);
+        if (time > bot.whiskerTimer) {
+            bot.whiskerTimer = time + 150 + Math.random() * 100;
+            const botCenter = bot.position.clone().add(new THREE.Vector3(0, 8, 0));
+            const fDir = dir.clone(); const lDir = fDir.clone().applyAxisAngle(new THREE.Vector3(0,1,0), Math.PI/4); const rDir = fDir.clone().applyAxisAngle(new THREE.Vector3(0,1,0), -Math.PI/4);
+            const checkWhisker = (direction) => { raycaster.set(botCenter, direction); const hits = raycaster.intersectObjects(cachedEnvObstacles); return hits.length > 0 ? hits[0].distance : Infinity; };
+            const distF = checkWhisker(fDir);
+            if (distF < 25) {
+                const distL = checkWhisker(lDir); const distR = checkWhisker(rDir);
+                if (distL > distF || distR > distF) {
+                    if (distL > distR) dir.copy(lDir); else dir.copy(rDir);
+                    bot.targetPos = bot.position.clone().add(dir.clone().multiplyScalar(40)); smoothLookAt(bot, bot.targetPos, 12, delta);
+                } else { dir.applyAxisAngle(new THREE.Vector3(0,1,0), Math.PI); bot.targetPos = bot.position.clone().add(dir.clone().multiplyScalar(40)); }
+            }
+            bot.lastDirCache = dir.clone();
+        } else if (bot.lastDirCache) { dir.copy(bot.lastDirCache); }
+        let hitX = false, hitZ = false;
+        bot.position.x += dir.x * speed; if (checkCollision(bot.position, 3)) { bot.position.x -= dir.x * speed; hitX = true; }
+        bot.position.z += dir.z * speed; if (checkCollision(bot.position, 3)) { bot.position.z -= dir.z * speed; hitZ = true; }
+        if ((hitX || hitZ) && bot.targetPos && bot.targetPos.y > bot.position.y + 5) { if (!bot.isJumping) { bot.velocityY = 60; bot.isJumping = true; } }
+        if ((hitX || hitZ) && !bot.isJumping && Math.random() < 0.3) { bot.wanderDir.set((Math.random()-0.5)*2, 0, (Math.random()-0.5)*2).normalize(); bot.targetPos = bot.position.clone().add(bot.wanderDir.clone().multiplyScalar(40)); bot.velocityY = 60; bot.isJumping = true; }
+        if (!bot.isJumping && Math.random() < 0.005) { bot.velocityY = 40 + Math.random() * 20; bot.isJumping = true; }
+        let isFloating = false;
+        if (gamePhase === 'active') { isFloating = applyStormPush(bot.position, delta, false); if (isFloating) { bot.isJumping = true; bot.velocityY = 0; } }
+        if (!isFloating) {
+            if (bot.position.y > targetFloorY + 2) bot.isJumping = true;
+            bot.velocityY -= 150 * delta; bot.position.y += bot.velocityY * delta;
+            if (bot.position.y <= targetFloorY) { bot.position.y = targetFloorY; bot.isJumping = false; bot.velocityY = 0; }
+        }
+    });
+}
+
+// ─── Main loop ────────────────────────────────────────────────────────────────
+let prevTime = performance.now();
+const velocity = new THREE.Vector3(); const direction = new THREE.Vector3(); let isJumping = false; let playerVelocityY = 0;
+
+// Throttle network updates
+let lastNetSend = 0;
+const NET_SEND_INTERVAL = 50; // ms (~20 updates/sec)
+
+function animate() {
+    requestAnimationFrame(animate);
+    const time = performance.now(); const rawDelta = (time - prevTime) / 1000; const delta = Math.min(rawDelta, 0.1);
+
+    if (gamePhase === 'active' && nightFadeProgress < 1) {
+        nightFadeProgress += delta * 0.2;
+        scene.background.lerpColors(dayColor, nightColor, nightFadeProgress);
+        scene.fog.color.copy(scene.background);
+        ambientLight.intensity = THREE.MathUtils.lerp(0.4, 0.2, nightFadeProgress);
+        dirLight.intensity = THREE.MathUtils.lerp(0.6, 0.3, nightFadeProgress);
+    }
+
+    if (gamePhase === 'active') {
+        stormRadius -= 12 * delta; if (stormRadius < 50) stormRadius = 50;
+        stormMesh.position.copy(stormCenter); stormMesh.position.y = 500;
+        stormMesh.scale.set(stormRadius, 1, stormRadius);
+    }
+
+    playerHitbox.position.copy(camera.position); playerHitbox.position.y -= 6;
+
+    if (controls.isLocked === true && !isVictory) {
+        const isMounted = playerMountedHorse !== null;
+        const currentFeetY = camera.position.y - (isMounted ? 22 : 12);
+        const targetFloorY = getFloorHeight(camera.position.x, camera.position.z, currentFeetY) + (isMounted ? 22 : 12);
+
+        if (playerIsGliding) {
+            playerGlider.position.copy(camera.position); playerGlider.position.y += 10;
+            const camDir = new THREE.Vector3(0,0,-1).applyQuaternion(camera.quaternion);
+            playerGlider.rotation.y = Math.atan2(camDir.x, camDir.z);
+            camera.position.y -= 80 * delta;
+            direction.z = Number(keys.w) - Number(keys.s); direction.x = Number(keys.d) - Number(keys.a);
+            if (direction.lengthSq() > 0) direction.normalize();
+            const vRight = new THREE.Vector3().setFromMatrixColumn(camera.matrix, 0);
+            const vForward = new THREE.Vector3().crossVectors(camera.up, vRight); vForward.y = 0; vForward.normalize();
+            const dx = vRight.x * (direction.x * 150 * delta) + vForward.x * (direction.z * 150 * delta);
+            const dz = vRight.z * (direction.x * 150 * delta) + vForward.z * (direction.z * 150 * delta);
+            camera.position.x += dx; camera.position.z += dz;
+            if (camera.position.y <= targetFloorY) { camera.position.y = targetFloorY; playerIsGliding = false; playerLanded = true; playerGlider.visible = false; }
+        } else {
+            velocity.x -= velocity.x * 10.0 * delta; velocity.z -= velocity.z * 10.0 * delta;
+            direction.z = Number(keys.w) - Number(keys.s); direction.x = Number(keys.d) - Number(keys.a);
+            if (direction.lengthSq() > 0) direction.normalize();
+            const accel = isMounted ? 800.0 : (playerIsInfected ? 350.0 : 400.0);
+            if (keys.w || keys.s) velocity.z -= direction.z * accel * delta;
+            if (keys.a || keys.d) velocity.x -= direction.x * accel * delta;
+            const vRight = new THREE.Vector3().setFromMatrixColumn(camera.matrix, 0);
+            const vForward = new THREE.Vector3().crossVectors(camera.up, vRight); vForward.y = 0; vForward.normalize();
+            const dx = vRight.x * (-velocity.x * delta) + vForward.x * (-velocity.z * delta);
+            const dz = vRight.z * (-velocity.x * delta) + vForward.z * (-velocity.z * delta);
+            camera.position.x += dx; if (checkCollision(camera.position, 3, true)) camera.position.x -= dx;
+            camera.position.z += dz; if (checkCollision(camera.position, 3, true)) camera.position.z -= dz;
+            let isFloating = false;
+            if (gamePhase === 'active') isFloating = applyStormPush(camera.position, delta, true);
+            if (!isFloating) {
+                if (camera.position.y > targetFloorY + 2) isJumping = true;
+                if (keys.space && !isJumping) { playerVelocityY = 65; isJumping = true; }
+                playerVelocityY -= 150 * delta; camera.position.y += playerVelocityY * delta;
+                if (camera.position.y <= targetFloorY) { camera.position.y = targetFloorY; isJumping = false; playerVelocityY = 0; }
+            } else { isJumping = true; }
+        }
+
+        // Send position update to server
+        if (GAME_MODE === 'multi' && socket && time - lastNetSend > NET_SEND_INTERVAL) {
+            lastNetSend = time;
+            socket.emit('pos_update', {
+                x: camera.position.x, y: camera.position.y, z: camera.position.z,
+                rotY: camera.rotation.y,
+                isGliding: playerIsGliding, landed: playerLanded,
+            });
+        }
+    }
+
+    updateBots(delta, time); updateHorses(delta, time); updateRadar();
+    prevTime = time; renderer.render(scene, camera);
+}
+
+// ─── Multiplayer socket events ────────────────────────────────────────────────
+if (GAME_MODE === 'multi' && socket) {
+    // Rejoin the room
+    socket.emit('join_room', ROOM_ID, (res) => {
+        if (!res.ok) {
+            // Room may have ended; go back to lobby
+            alert('Could not connect to room: ' + (res.error || 'Unknown error'));
+            window.location.href = 'lobby.html';
+        }
+    });
+
+    socket.on('pos_update', ({ id, x, y, z, rotY, isGliding, landed }) => {
+        const entry = getOrCreateMpMesh(id);
+        if (!entry) return;
+        entry.isGliding = isGliding;
+        entry.landed = landed;
+        if (entry.mesh) {
+            entry.mesh.position.set(x, y - 12, z); // offset to feet
+            entry.mesh.rotation.y = rotY;
+            entry.mesh.gliderRef.visible = isGliding;
+        }
+    });
+
+    socket.on('player_joined', ({ id, name }) => {
+        if (!mpPlayers[id]) mpPlayers[id] = { mesh: null, isInfected: false, isGliding: true, landed: false, name };
+        if (sharedBotGeometry) getOrCreateMpMesh(id);
+        survivorsLeft++;
+        document.getElementById('survivors-count').innerText = survivorsLeft;
+        logFeed(`${name} joined!`, '#aaaaff');
+    });
+
+    socket.on('player_left', ({ id }) => {
+        if (mpPlayers[id] && mpPlayers[id].mesh) { scene.remove(mpPlayers[id].mesh); }
+        if (mpPlayers[id] && !mpPlayers[id].isInfected) { survivorsLeft--; document.getElementById('survivors-count').innerText = survivorsLeft; }
+        delete mpPlayers[id];
+    });
+
+    socket.on('infected', ({ targetId, byId, byName }) => {
+        if (targetId === socket.id) {
+            infectPlayer(byName || 'a Player');
+        } else {
+            infectMpPlayer(targetId, byName || 'a Player');
+        }
+    });
+
+    socket.on('game_over', ({ result }) => {
+        if (isVictory) return;
+        isVictory = true; controls.unlock();
+        document.getElementById('victory').innerText = result === 'infection' ? 'INFECTION WINS!' : 'SURVIVORS WIN!';
+        document.getElementById('victory').style.color = result === 'infection' ? '#33ff33' : '#ff3333';
+        document.getElementById('victory').style.display = 'block';
+        document.getElementById('back-to-lobby').style.display = 'block';
+        document.getElementById('blocker').style.display = 'flex';
+    });
+
+    socket.on('disconnect', () => {
+        if (!isVictory) alert('Disconnected from server.');
+    });
+}
+
+// ─── Start ────────────────────────────────────────────────────────────────────
+window.addEventListener('resize', () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix(); renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+processLoadingTasks();
+</script>
+</body>
+</html>
