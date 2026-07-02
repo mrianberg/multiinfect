@@ -158,44 +158,55 @@
 
 <script src="/socket.io/socket.io.js"></script>
 <script>
-// ─── Menu audio: soft procedural ambient theme + UI blips (Web Audio) ─────────
-let lAudioCtx = null, lMusic = null, lReady = false;
+// ─── Menu audio: dark ambient dread bed + UI blips (Web Audio) ────────────────
+let lAudioCtx = null, lMusic = null, lReverb = null, lReady = false, lNoise = null;
+function lMidi(m) { return 440 * Math.pow(2, (m - 69) / 12); }
+function lRev(node, amt) { const g = lAudioCtx.createGain(); g.gain.value = amt; node.connect(g); g.connect(lReverb); }
 function lobbyAudioInit() {
     if (lReady) { if (lAudioCtx.state === 'suspended') lAudioCtx.resume(); return; }
     const AC = window.AudioContext || window.webkitAudioContext;
     if (!AC) return;
     lAudioCtx = new AC();
-    lMusic = lAudioCtx.createGain(); lMusic.gain.value = 0.22; lMusic.connect(lAudioCtx.destination);
+    lMusic = lAudioCtx.createGain(); lMusic.gain.value = 0.3; lMusic.connect(lAudioCtx.destination);
     lReady = true;
-    // slow minor-key pad arpeggio loop
-    const prog = [[57,60,64], [55,59,62], [53,57,60], [52,55,59]];
-    let step = 0, next = lAudioCtx.currentTime + 0.1;
-    setInterval(() => {
-        if (!lReady) return;
-        const dur = 0.5;
-        while (next < lAudioCtx.currentTime + 0.3) {
-            const chord = prog[Math.floor(step / 3) % 4];
-            const m = chord[step % 3];
-            const f = 440 * Math.pow(2, (m - 69) / 12);
-            const o = lAudioCtx.createOscillator(); o.type = 'triangle'; o.frequency.value = f;
-            const g = lAudioCtx.createGain();
-            g.gain.setValueAtTime(0.0001, next); g.gain.linearRampToValueAtTime(0.15, next + 0.05); g.gain.exponentialRampToValueAtTime(0.0001, next + dur * 1.6);
-            o.connect(g); g.connect(lMusic); o.start(next); o.stop(next + dur * 1.7);
-            if (step % 3 === 0) { // soft bass
-                const bo = lAudioCtx.createOscillator(); bo.type = 'sine'; bo.frequency.value = 440 * Math.pow(2, (chord[0] - 12 - 69) / 12);
-                const bg = lAudioCtx.createGain(); bg.gain.setValueAtTime(0.0001, next); bg.gain.linearRampToValueAtTime(0.18, next + 0.05); bg.gain.exponentialRampToValueAtTime(0.0001, next + dur * 2);
-                bo.connect(bg); bg.connect(lMusic); bo.start(next); bo.stop(next + dur * 2.1);
+    // reverb
+    lReverb = lAudioCtx.createConvolver();
+    const rl = Math.floor(lAudioCtx.sampleRate * 3.5), imp = lAudioCtx.createBuffer(2, rl, lAudioCtx.sampleRate);
+    for (let ch = 0; ch < 2; ch++) { const d = imp.getChannelData(ch); for (let i = 0; i < rl; i++) d[i] = (Math.random()*2-1) * Math.pow(1 - i/rl, 2.8); }
+    lReverb.buffer = imp; const rg = lAudioCtx.createGain(); rg.gain.value = 0.9; lReverb.connect(rg); rg.connect(lMusic);
+    // noise for drone/wind
+    lNoise = lAudioCtx.createBuffer(1, lAudioCtx.sampleRate * 2, lAudioCtx.sampleRate);
+    const nd = lNoise.getChannelData(0); for (let i=0;i<nd.length;i++) nd[i]=Math.random()*2-1;
+    // low detuned drone (A) + fifth
+    const df = lAudioCtx.createBiquadFilter(); df.type='lowpass'; df.frequency.value=260; df.Q.value=4;
+    const dg = lAudioCtx.createGain(); dg.gain.value=0.0; df.connect(dg); dg.connect(lMusic); lRev(df, 0.25);
+    [55, 82.4, 55.2].forEach((f,i)=>{ const o=lAudioCtx.createOscillator(); o.type=i===1?'triangle':'sawtooth'; o.frequency.value=f; const g=lAudioCtx.createGain(); g.gain.value=i===1?0.35:0.5; o.connect(g); g.connect(df); o.start(); });
+    const lfo=lAudioCtx.createOscillator(); lfo.type='sine'; lfo.frequency.value=0.05; const lg=lAudioCtx.createGain(); lg.gain.value=110; lfo.connect(lg); lg.connect(df.frequency); lfo.start();
+    dg.gain.setTargetAtTime(0.16, lAudioCtx.currentTime, 3);
+    // wind
+    const wn=lAudioCtx.createBufferSource(); wn.buffer=lNoise; wn.loop=true; const wf=lAudioCtx.createBiquadFilter(); wf.type='lowpass'; wf.frequency.value=320; const wg=lAudioCtx.createGain(); wg.gain.value=0.12; wn.connect(wf); wf.connect(wg); wg.connect(lMusic); wn.start();
+    // sparse dissonant bells (A Phrygian tension notes)
+    const notes=[46,53,57,58,60,65]; let next=lAudioCtx.currentTime+0.5;
+    setInterval(()=>{
+        if(!lReady) return;
+        while(next < lAudioCtx.currentTime + 0.6){
+            if(Math.random()<0.5){
+                const m=notes[Math.floor(Math.random()*notes.length)];
+                const f=lMidi(m); const g=lAudioCtx.createGain();
+                g.gain.setValueAtTime(0.0001,next); g.gain.linearRampToValueAtTime(0.13,next+0.02); g.gain.exponentialRampToValueAtTime(0.0001,next+2.6);
+                [1,1.004].forEach(mul=>{ const o=lAudioCtx.createOscillator(); o.type='triangle'; o.frequency.value=f*mul; o.connect(g); o.start(next); o.stop(next+2.7); });
+                g.connect(lMusic); lRev(g,0.85);
             }
-            next += dur; step = (step + 1) % 12;
+            next += 1.4;
         }
-    }, 60);
+    }, 80);
     if (lAudioCtx.state === 'suspended') lAudioCtx.resume();
 }
 function lobbyBlip() {
     if (!lReady) return; const t = lAudioCtx.currentTime;
-    const o = lAudioCtx.createOscillator(); o.type = 'square'; o.frequency.setValueAtTime(660, t); o.frequency.exponentialRampToValueAtTime(990, t + 0.06);
-    const g = lAudioCtx.createGain(); g.gain.setValueAtTime(0.12, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.09);
-    o.connect(g); g.connect(lMusic); o.start(t); o.stop(t + 0.1);
+    const o = lAudioCtx.createOscillator(); o.type = 'triangle'; o.frequency.setValueAtTime(330, t); o.frequency.exponentialRampToValueAtTime(220, t + 0.1);
+    const g = lAudioCtx.createGain(); g.gain.setValueAtTime(0.14, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.16);
+    o.connect(g); g.connect(lMusic); lRev(g, 0.4); o.start(t); o.stop(t + 0.18);
 }
 // First user gesture anywhere starts the theme; clicks blip
 document.addEventListener('click', () => { lobbyAudioInit(); lobbyBlip(); });

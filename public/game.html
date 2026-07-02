@@ -222,81 +222,136 @@ const sunSprite = (() => {
     return sprite;
 })();
 
-// ─── Audio: fully procedural music + SFX via Web Audio (no external files) ─────
+// ─── Audio: procedural cinematic-horror score + SFX (Web Audio, no files) ─────
 let audioCtx = null, masterGain = null, musicGain = null, sfxGain = null, ambientGain = null;
+let reverbNode = null, reverbGain = null, droneGain = null, droneFilter = null;
 let audioReady = false, audioMuted = false, noiseBuffer = null;
-let nextNoteTime = 0, musicStep = 0, musicScheduler = null;
+let nextNoteTime = 0, musicBeat = 0, musicScheduler = null;
 
 function initAudio() {
     if (audioReady) { if (audioCtx.state === 'suspended') audioCtx.resume(); return; }
     const AC = window.AudioContext || window.webkitAudioContext;
     if (!AC) return;
     audioCtx = new AC();
-    masterGain = audioCtx.createGain(); masterGain.gain.value = audioMuted ? 0 : 0.55; masterGain.connect(audioCtx.destination);
-    musicGain = audioCtx.createGain(); musicGain.gain.value = 0.30; musicGain.connect(masterGain);
+    masterGain = audioCtx.createGain(); masterGain.gain.value = audioMuted ? 0 : 0.6; masterGain.connect(audioCtx.destination);
+    musicGain = audioCtx.createGain(); musicGain.gain.value = 0.5; musicGain.connect(masterGain);
     sfxGain = audioCtx.createGain(); sfxGain.gain.value = 0.55; sfxGain.connect(masterGain);
     ambientGain = audioCtx.createGain(); ambientGain.gain.value = 0.0; ambientGain.connect(masterGain);
+
     noiseBuffer = audioCtx.createBuffer(1, audioCtx.sampleRate * 2, audioCtx.sampleRate);
     const nd = noiseBuffer.getChannelData(0);
     for (let i = 0; i < nd.length; i++) nd[i] = Math.random() * 2 - 1;
+
+    // Convolution reverb (synth impulse) — the single biggest thing that makes
+    // the score read as cinematic space instead of a dry arcade bleep.
+    reverbNode = audioCtx.createConvolver();
+    const rlen = Math.floor(audioCtx.sampleRate * 3.8);
+    const imp = audioCtx.createBuffer(2, rlen, audioCtx.sampleRate);
+    for (let ch = 0; ch < 2; ch++) { const d = imp.getChannelData(ch); for (let i = 0; i < rlen; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / rlen, 2.8); }
+    reverbNode.buffer = imp;
+    reverbGain = audioCtx.createGain(); reverbGain.gain.value = 0.9;
+    reverbNode.connect(reverbGain); reverbGain.connect(masterGain);
+
     audioReady = true;
     startWind();
-    nextNoteTime = audioCtx.currentTime + 0.1;
-    musicScheduler = setInterval(scheduleMusic, 25);
+    startDrone();
+    nextNoteTime = audioCtx.currentTime + 0.15;
+    musicScheduler = setInterval(scheduleMusic, 40);
     if (audioCtx.state === 'suspended') audioCtx.resume();
     const hint = document.getElementById('audio-hint');
     if (hint) { hint.style.opacity = '1'; setTimeout(() => hint.style.opacity = '0', 4000); }
 }
 function midiFreq(m) { return 440 * Math.pow(2, (m - 69) / 12); }
+function revSend(node, amount) { const g = audioCtx.createGain(); g.gain.value = amount; node.connect(g); g.connect(reverbNode); }
 
-// ── instruments (route to musicGain) ──
-function mPluck(freq, t, dur, gain, type) {
-    const o = audioCtx.createOscillator(); o.type = type || 'triangle'; o.frequency.value = freq;
-    const g = audioCtx.createGain();
-    g.gain.setValueAtTime(0.0001, t); g.gain.linearRampToValueAtTime(gain, t + 0.008); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
-    o.connect(g); g.connect(musicGain); o.start(t); o.stop(t + dur + 0.02);
-}
-function mBass(freq, t, dur, gain) {
-    const o = audioCtx.createOscillator(); o.type = 'sawtooth'; o.frequency.value = freq;
-    const f = audioCtx.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = 480;
-    const g = audioCtx.createGain();
-    g.gain.setValueAtTime(0.0001, t); g.gain.linearRampToValueAtTime(gain, t + 0.01); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
-    o.connect(f); f.connect(g); g.connect(musicGain); o.start(t); o.stop(t + dur + 0.02);
-}
-function mKick(t, gain) {
-    const o = audioCtx.createOscillator(); o.type = 'sine';
-    o.frequency.setValueAtTime(140, t); o.frequency.exponentialRampToValueAtTime(45, t + 0.12);
-    const g = audioCtx.createGain(); g.gain.setValueAtTime(gain, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.16);
-    o.connect(g); g.connect(musicGain); o.start(t); o.stop(t + 0.18);
-}
-function mHat(t, gain) {
-    const s = audioCtx.createBufferSource(); s.buffer = noiseBuffer;
-    const f = audioCtx.createBiquadFilter(); f.type = 'highpass'; f.frequency.value = 7000;
-    const g = audioCtx.createGain(); g.gain.setValueAtTime(gain, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.05);
-    s.connect(f); f.connect(g); g.connect(musicGain); s.start(t); s.stop(t + 0.06);
+// ── persistent low drone: 3 detuned oscillators (root + fifth) through a slowly
+// sweeping lowpass; the dread foundation everything sits on ──
+function startDrone() {
+    droneFilter = audioCtx.createBiquadFilter(); droneFilter.type = 'lowpass'; droneFilter.frequency.value = 240; droneFilter.Q.value = 4;
+    droneGain = audioCtx.createGain(); droneGain.gain.value = 0.0;
+    droneFilter.connect(droneGain); droneGain.connect(masterGain); revSend(droneFilter, 0.25);
+    const dets = [0, 7, 0.15]; // root, fifth, and a slightly-detuned root for beating
+    [55, 82.4, 55.2].forEach((f, i) => {
+        const o = audioCtx.createOscillator(); o.type = i === 1 ? 'triangle' : 'sawtooth'; o.frequency.value = f;
+        const g = audioCtx.createGain(); g.gain.value = i === 1 ? 0.35 : 0.5;
+        o.connect(g); g.connect(droneFilter); o.start();
+    });
+    // slow filter LFO for a breathing, uneasy motion
+    const lfo = audioCtx.createOscillator(); lfo.type = 'sine'; lfo.frequency.value = 0.06;
+    const lg = audioCtx.createGain(); lg.gain.value = 120;
+    lfo.connect(lg); lg.connect(droneFilter.frequency); lfo.start();
+    droneGain.gain.setTargetAtTime(0.16, audioCtx.currentTime, 3); // fade in slowly
 }
 function startWind() {
     const s = audioCtx.createBufferSource(); s.buffer = noiseBuffer; s.loop = true;
-    const f = audioCtx.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = 380;
+    const f = audioCtx.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = 340;
     s.connect(f); f.connect(ambientGain); s.start();
 }
 
-// ── looping sequencer, key of A minor; tenser + faster in the active phase ──
-const MUSIC_PROG = [[57,60,64,69], [53,57,60,65], [55,59,62,67], [52,55,59,64]]; // Am F C G
+// ── instruments ──
+function heartbeat(t, gain) { // soft, round, felt-more-than-heard low thump
+    const o = audioCtx.createOscillator(); o.type = 'sine';
+    o.frequency.setValueAtTime(75, t); o.frequency.exponentialRampToValueAtTime(38, t + 0.16);
+    const g = audioCtx.createGain(); g.gain.setValueAtTime(0.0001, t); g.gain.linearRampToValueAtTime(gain, t + 0.02); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.32);
+    o.connect(g); g.connect(musicGain); o.start(t); o.stop(t + 0.34);
+}
+function bell(freq, t, gain) { // eerie detuned struck tone with a long reverb tail
+    const g = audioCtx.createGain();
+    g.gain.setValueAtTime(0.0001, t); g.gain.linearRampToValueAtTime(gain, t + 0.01); g.gain.exponentialRampToValueAtTime(0.0001, t + 2.4);
+    [1, 1.004, 2.01].forEach((mul, i) => {
+        const o = audioCtx.createOscillator(); o.type = i === 2 ? 'sine' : 'triangle'; o.frequency.value = freq * mul;
+        const og = audioCtx.createGain(); og.gain.value = i === 2 ? 0.35 : 1;
+        o.connect(og); og.connect(g); o.start(t); o.stop(t + 2.5);
+    });
+    g.connect(musicGain); revSend(g, 0.85);
+}
+function padSwell(notes, t, gain, dur) { // slow dissonant chord swell (root + b2 tension)
+    const f = audioCtx.createBiquadFilter(); f.type = 'lowpass'; f.frequency.setValueAtTime(300, t); f.frequency.linearRampToValueAtTime(900, t + dur * 0.5); f.frequency.linearRampToValueAtTime(300, t + dur);
+    const g = audioCtx.createGain();
+    g.gain.setValueAtTime(0.0001, t); g.gain.linearRampToValueAtTime(gain, t + dur * 0.4); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    f.connect(g); g.connect(musicGain); revSend(g, 0.7);
+    notes.forEach(m => {
+        const o = audioCtx.createOscillator(); o.type = 'sawtooth'; o.frequency.value = midiFreq(m);
+        const o2 = audioCtx.createOscillator(); o2.type = 'sawtooth'; o2.frequency.value = midiFreq(m) * 1.006;
+        o.connect(f); o2.connect(f); o.start(t); o2.start(t); o.stop(t + dur + 0.1); o2.stop(t + dur + 0.1);
+    });
+}
+function subPulse(t, gain) { // rhythmic low tension pulse (active phase)
+    const o = audioCtx.createOscillator(); o.type = 'triangle'; o.frequency.value = 55;
+    const f = audioCtx.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = 160;
+    const g = audioCtx.createGain(); g.gain.setValueAtTime(0.0001, t); g.gain.linearRampToValueAtTime(gain, t + 0.02); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.22);
+    o.connect(f); f.connect(g); g.connect(musicGain); o.start(t); o.stop(t + 0.24);
+}
+
+// ── atmospheric, beat-based scheduler. A Phrygian (A Bb C D E F G) for dread;
+// slow heartbeat + sparse dissonant motifs, tightening in the active phase ──
+const PHRYG = [45, 46, 48, 50, 52, 53, 55]; // A2 Bb2 C3 D3 E3 F3 G3
+const TENSION_NOTES = [46, 53, 58, 60, 65]; // Bb, F, Bb(oct), C, F — the uneasy ones
 function scheduleMusic() {
     if (!audioReady || audioMuted) return;
     const active = gamePhase === 'active';
-    const stepDur = 60 / (active ? 128 : 96) / 2; // eighth notes
-    while (nextNoteTime < audioCtx.currentTime + 0.12) {
-        const step = musicStep, t = nextNoteTime;
-        const chord = MUSIC_PROG[Math.floor(step / 8) % 4];
-        if (step % 4 === 0) mKick(t, active ? 1.0 : 0.6);
-        if (step % 2 === 1) mHat(t, active ? 0.16 : 0.09);
-        if (step % 4 === 0 || (active && step % 8 === 6)) mBass(midiFreq(chord[0] - 12), t, 0.22, active ? 0.5 : 0.3);
-        if (step % 2 === 0 || active) mPluck(midiFreq(chord[step % chord.length] + (active ? 12 : 0)), t, active ? 0.16 : 0.28, active ? 0.2 : 0.14, active ? 'square' : 'triangle');
-        if (step % 8 === 0) mPluck(midiFreq(chord[2] + 12), t, 1.3, 0.05, 'sawtooth'); // soft pad
-        nextNoteTime += stepDur;
-        musicStep = (musicStep + 1) % 32;
+    // drone opens up and rises with the phase
+    if (droneGain) droneGain.gain.setTargetAtTime(active ? 0.26 : 0.16, audioCtx.currentTime, 2);
+    if (droneFilter) droneFilter.Q.value = active ? 7 : 4;
+    const bpm = active ? 96 : 66; // slow, ominous — not danceable
+    const beatDur = 60 / bpm;
+    while (nextNoteTime < audioCtx.currentTime + 0.35) {
+        const beat = musicBeat, t = nextNoteTime;
+        // heartbeat "lub-dub" every beat; louder/tighter when active
+        heartbeat(t, active ? 0.5 : 0.32);
+        heartbeat(t + beatDur * 0.26, active ? 0.34 : 0.2);
+        // sparse dissonant bell motif
+        if (Math.random() < (active ? 0.42 : 0.24)) {
+            const pool = Math.random() < 0.6 ? TENSION_NOTES : PHRYG;
+            const m = pool[Math.floor(Math.random() * pool.length)] + (Math.random() < 0.3 ? 12 : 0);
+            bell(midiFreq(m), t + Math.random() * beatDur * 0.5, active ? 0.16 : 0.12);
+        }
+        // dissonant pad swell every 8 beats (root + minor-2nd + fifth)
+        if (beat % 8 === 0) padSwell([33, 34, 40], t, active ? 0.14 : 0.09, beatDur * 8);
+        // active phase: pulsing low tension on the off-beats
+        if (active && beat % 2 === 1) subPulse(t, 0.3);
+        nextNoteTime += beatDur;
+        musicBeat = (musicBeat + 1) % 64;
     }
 }
 
@@ -308,10 +363,26 @@ function tone(type, f0, f1, dur, gain) {
     const g = audioCtx.createGain(); g.gain.setValueAtTime(gain, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
     o.connect(g); g.connect(sfxGain); o.start(t); o.stop(t + dur + 0.02);
 }
-function sfxJump() { tone('square', 300, 620, 0.12, 0.16); }
+function sfxJump() { tone('sine', 240, 460, 0.12, 0.14); }
 function sfxLand() { tone('sine', 170, 45, 0.16, 0.35); }
-function sfxMount() { tone('triangle', 330, 440, 0.1, 0.22); setTimeout(() => tone('triangle', 494, 587, 0.12, 0.22), 90); }
-function sfxBeep(hi) { tone('square', hi ? 880 : 520, null, 0.11, 0.22); }
+function sfxMount() { tone('triangle', 330, 440, 0.1, 0.2); setTimeout(() => tone('triangle', 494, 587, 0.12, 0.2), 90); }
+function sfxBeep(hi) { // ominous low pulse, not a chiptune beep
+    if (!audioReady) return; const t = audioCtx.currentTime;
+    const o = audioCtx.createOscillator(); o.type = 'triangle'; o.frequency.value = hi ? 155 : 110;
+    const g = audioCtx.createGain(); g.gain.setValueAtTime(0.0001, t); g.gain.linearRampToValueAtTime(0.3, t + 0.01); g.gain.exponentialRampToValueAtTime(0.001, t + 0.5);
+    o.connect(g); g.connect(sfxGain); revSend(g, 0.5); o.start(t); o.stop(t + 0.52);
+}
+function sfxInfectionStart() { // dread riser + low boom as the infection begins
+    if (!audioReady) return; const t = audioCtx.currentTime;
+    const s = audioCtx.createBufferSource(); s.buffer = noiseBuffer;
+    const f = audioCtx.createBiquadFilter(); f.type = 'bandpass'; f.Q.value = 1.5;
+    f.frequency.setValueAtTime(200, t); f.frequency.exponentialRampToValueAtTime(3500, t + 2.2);
+    const g = audioCtx.createGain(); g.gain.setValueAtTime(0.0001, t); g.gain.linearRampToValueAtTime(0.4, t + 2.0); g.gain.exponentialRampToValueAtTime(0.001, t + 2.6);
+    s.connect(f); f.connect(g); g.connect(sfxGain); revSend(g, 0.6); s.start(t); s.stop(t + 2.7);
+    const o = audioCtx.createOscillator(); o.type = 'sine'; o.frequency.setValueAtTime(90, t + 2.0); o.frequency.exponentialRampToValueAtTime(30, t + 3.2);
+    const bg = audioCtx.createGain(); bg.gain.setValueAtTime(0.0001, t + 2.0); bg.gain.linearRampToValueAtTime(0.6, t + 2.1); bg.gain.exponentialRampToValueAtTime(0.001, t + 3.4);
+    o.connect(bg); bg.connect(sfxGain); revSend(bg, 0.5); o.start(t + 2.0); o.stop(t + 3.5);
+}
 function sfxYouInfected() { tone('square', 220, 920, 0.2, 0.28); } // you tagged someone (good)
 function sfxInfectedYou() { // you got infected (bad): downward zap + squelch
     if (!audioReady) return; const t = audioCtx.currentTime;
@@ -323,13 +394,11 @@ function sfxInfectedYou() { // you got infected (bad): downward zap + squelch
 }
 function sfxVictory(win) {
     if (!audioReady) return; const t0 = audioCtx.currentTime;
-    const seq = win ? [60, 64, 67, 72] : [60, 58, 55, 48];
-    seq.forEach((m, i) => {
-        const t = t0 + i * 0.15;
-        const o = audioCtx.createOscillator(); o.type = 'square'; o.frequency.value = midiFreq(m);
-        const g = audioCtx.createGain(); g.gain.setValueAtTime(0.0001, t); g.gain.linearRampToValueAtTime(0.28, t + 0.02); g.gain.exponentialRampToValueAtTime(0.001, t + 0.35);
-        o.connect(g); g.connect(sfxGain); o.start(t); o.stop(t + 0.37);
-    });
+    // Bell tones with reverb tails rather than chiptune blips: a resolved
+    // A-minor triad rising if the player's side won, a descending dissonant
+    // Phrygian fall if it lost.
+    const seq = win ? [57, 60, 64, 69] : [60, 58, 56, 53];
+    seq.forEach((m, i) => bell(midiFreq(m), t0 + i * 0.22, 0.2));
 }
 function toggleMute() {
     audioMuted = !audioMuted;
@@ -864,6 +933,7 @@ function beginActivePhase() {
     stormCenter.set((stormRand()-0.5)*2000, 0, (stormRand()-0.5)*2000);
     stormMesh.visible = true;
     if (!matchStartMs) matchStartMs = performance.now();
+    sfxInfectionStart(); // dread riser as the outbreak begins
 
     if (matchTimerId === null) {
         matchTimerId = setInterval(() => {
