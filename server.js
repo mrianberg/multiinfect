@@ -5,10 +5,11 @@ const { randomBytes } = require('crypto');
 
 const app = express();
 const server = http.createServer(app);
-// Same-origin in production (served behind Apache on ian-berg.com); '*' only if
-// ALLOW_ANY_ORIGIN is set for local testing.
+// Restrict to the site's own origin (http and https — the site runs on plain
+// HTTP today). Set ALLOW_ANY_ORIGIN=1 for local testing.
+const ALLOWED_ORIGINS = ['http://ian-berg.com', 'https://ian-berg.com', 'http://www.ian-berg.com', 'https://www.ian-berg.com'];
 const io = new Server(server, {
-    cors: { origin: process.env.ALLOW_ANY_ORIGIN ? '*' : 'https://ian-berg.com' },
+    cors: { origin: process.env.ALLOW_ANY_ORIGIN ? '*' : ALLOWED_ORIGINS },
     maxHttpBufferSize: 1e6, // 1 MB cap on any single packet
 });
 
