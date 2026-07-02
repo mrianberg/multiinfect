@@ -109,6 +109,8 @@ const MY_NAME   = urlParams.get('name') || 'Player';
 // ─── Multiplayer setup ────────────────────────────────────────────────────────
 let socket = null;
 let mpPlayers = {}; // id → { mesh, isInfected, isGliding, landed, targetPos, targetRotY, name }
+// The room host simulates bot AI and broadcasts positions; other clients replicate.
+let iAmBotHost = false;
 
 if (GAME_MODE === 'multi') {
     socket = io();
@@ -792,13 +794,21 @@ function updateBots(delta, time) {
             let dyP = b1.position.y - playerFeetY;
             if (dxP*dxP + dyP*dyP + dzP*dzP < 180) {
                 if (b1.isInfected && !playerIsInfected) infectPlayer("Infected Horde");
-                else if (!b1.isInfected && playerIsInfected) infectBot(b1, "YOU");
+                else if (!b1.isInfected && playerIsInfected) {
+                    infectBot(b1, "YOU");
+                    // Tell everyone else this bot is infected now
+                    if (GAME_MODE === 'multi' && socket) socket.emit('bot_infected', { index: i, byName: MY_NAME });
+                }
             }
-            // Bot vs bot contact
-            if (b1.isInfected) {
+            // Bot vs bot contact — host-authoritative in multi (each spread is
+            // decided once and broadcast, keeping survivor counts in sync)
+            if (b1.isInfected && (GAME_MODE !== 'multi' || iAmBotHost)) {
                 for (let j = 0; j < bots.length; j++) {
                     let b2 = bots[j];
-                    if (!b2.isInfected && b1.position.distanceToSquared(b2.position) < 75) infectBot(b2, "Infected Horde");
+                    if (!b2.isInfected && b1.position.distanceToSquared(b2.position) < 75) {
+                        infectBot(b2, "Infected Horde");
+                        if (GAME_MODE === 'multi' && socket) socket.emit('bot_infected', { index: j, byName: "Infected Horde" });
+                    }
                 }
             }
             // NOTE: bots are simulated per-client, so MY bots never infect
@@ -828,6 +838,22 @@ function updateBots(delta, time) {
         let secondsLeft = Math.ceil((phaseTimer - time) / 1000);
         document.getElementById('phase-alert').innerText = `INFECTION IN: ${secondsLeft}`;
         if (time > phaseTimer) triggerFirstInfection();
+    }
+
+    // Non-host clients don't run bot AI — they smoothly replicate the
+    // positions broadcast by the host, so every player sees the same bots.
+    if (GAME_MODE === 'multi' && !iAmBotHost) {
+        const k = Math.min(1, delta * 10);
+        bots.forEach(bot => {
+            if (!bot.netTarget) return; // no host data yet (host still loading)
+            bot.position.lerp(bot.netTarget, k);
+            let d = (bot.netRotY || 0) - bot.rotation.y;
+            d = Math.atan2(Math.sin(d), Math.cos(d));
+            bot.rotation.y += d * k;
+            if (bot.gliderRef.visible !== bot.netGliding) bot.gliderRef.visible = bot.netGliding;
+            if (!bot.netGliding && bot.isGliding) { bot.isGliding = false; bot.landed = true; }
+        });
+        return;
     }
 
     let botsThinkingThisFrame = 0;
@@ -993,6 +1019,8 @@ const _lookDir = new THREE.Vector3();
 // Throttle network updates
 let lastNetSend = 0;
 const NET_SEND_INTERVAL = 50; // ms (~20 updates/sec)
+let lastBotSend = 0;
+const BOT_SEND_INTERVAL = 100; // ms (10 updates/sec, interpolated on receivers)
 
 function animate() {
     requestAnimationFrame(animate);
@@ -1068,6 +1096,16 @@ function animate() {
         }
     }
 
+    // Host streams bot positions to the room (runs even while paused, so
+    // other players' bots keep moving)
+    if (GAME_MODE === 'multi' && socket && iAmBotHost && bots.length > 0 && time - lastBotSend > BOT_SEND_INTERVAL) {
+        lastBotSend = time;
+        socket.emit('bots_state', bots.map(b => [
+            +b.position.x.toFixed(1), +b.position.y.toFixed(1), +b.position.z.toFixed(1),
+            +b.rotation.y.toFixed(2), b.isGliding ? 1 : 0
+        ]));
+    }
+
     updateBots(delta, time); updateHorses(delta, time); updateMpPlayers(delta); updateRadar();
     prevTime = time; renderer.render(scene, camera);
 }
@@ -1117,6 +1155,31 @@ if (GAME_MODE === 'multi' && socket) {
         }
     });
 
+    // Replicated bot positions from the host
+    socket.on('bots_state', (arr) => {
+        if (!Array.isArray(arr)) return;
+        for (let i = 0; i < arr.length && i < bots.length; i++) {
+            const s = arr[i]; const bot = bots[i];
+            if (!bot.netTarget) {
+                bot.netTarget = new THREE.Vector3(s[0], s[1], s[2]);
+                bot.position.copy(bot.netTarget); // snap on first packet
+            } else {
+                bot.netTarget.set(s[0], s[1], s[2]);
+            }
+            bot.netRotY = s[3]; bot.netGliding = !!s[4];
+        }
+    });
+
+    // A bot was tagged somewhere in the room
+    socket.on('bot_infected', ({ index, byName }) => {
+        if (bots[index]) infectBot(bots[index], byName || 'Infected Horde');
+    });
+
+    // Bot-simulation host changed (previous host left)
+    socket.on('new_host', ({ id }) => {
+        iAmBotHost = (id === socket.id);
+    });
+
     socket.on('game_over', ({ result }) => {
         if (isVictory) return;
         isVictory = true; controls.unlock();
@@ -1148,6 +1211,7 @@ if (GAME_MODE === 'multi' && socket) {
             return;
         }
         WORLD_SEED = res.seed >>> 0;
+        iAmBotHost = (res.hostId === socket.id);
         // Pre-register players already in the room so meshes + survivor
         // counts are correct from the start.
         (res.players || []).forEach(p => {

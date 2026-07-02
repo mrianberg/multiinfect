@@ -87,6 +87,13 @@ io.on('connection', (socket) => {
         if (room.state === 'ended') return callback({ ok: false, error: 'Game has ended' });
         room.emptySince = null;
 
+        // If the previous host never made it into the game (or the room was
+        // briefly empty during the lobby→game transition), this joiner hosts.
+        // The host client is authoritative for bot simulation.
+        if (room.players.size === 0 || !room.players.has(room.hostId)) {
+            room.hostId = socket.id;
+        }
+
         room.players.set(socket.id, {
             id: socket.id,
             name: socket.playerName,
@@ -147,6 +154,24 @@ io.on('connection', (socket) => {
             rotY: data.rotY, isGliding: data.isGliding, landed: data.landed,
             mounted: data.mounted,
         });
+    });
+
+    // Host broadcasts bot positions; everyone else replicates them
+    socket.on('bots_state', (data) => {
+        const room = rooms.get(socket.roomId);
+        if (!room || room.state !== 'ingame' || room.hostId !== socket.id) return;
+        socket.to(socket.roomId).volatile.emit('bots_state', data);
+    });
+
+    // Any client can report tagging a bot; dedupe so the count drops once
+    socket.on('bot_infected', ({ index, byName }) => {
+        const room = rooms.get(socket.roomId);
+        if (!room || room.state !== 'ingame') return;
+        if (typeof index !== 'number') return;
+        if (!room.botsInfected) room.botsInfected = new Set();
+        if (room.botsInfected.has(index)) return;
+        room.botsInfected.add(index);
+        socket.to(socket.roomId).emit('bot_infected', { index, byName });
     });
 
     // Authoritative infection events — broadcast to room
