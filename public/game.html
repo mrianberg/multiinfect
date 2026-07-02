@@ -388,6 +388,19 @@ function noiseBurst(t, dur, gain, filtType, f0, f1, Q, rev) {
     s.connect(f); f.connect(g); g.connect(sfxGain); if (rev) revSend(g, rev);
     s.start(t); s.stop(t + dur + 0.02);
 }
+// Short creepy hit whenever ANY bot / remote player gets infected. Pitch varies
+// per call and it's throttled so an infection cascade becomes an unsettling
+// flurry rather than a wall of noise.
+let lastInfectSfx = 0;
+function sfxInfect() {
+    if (!audioReady) return;
+    const now = performance.now();
+    if (now - lastInfectSfx < 55) return;
+    lastInfectSfx = now;
+    const t = audioCtx.currentTime, p = 0.8 + Math.random() * 0.5;
+    ringTone(400 * p, 120 * p, 190 * p, t, 0.16, 0.11, 0.25); // quick alien tick
+    noiseBurst(t, 0.12, 0.09, 'bandpass', 2200 * p, 480 * p, 4, 0.2); // short wet hiss
+}
 function sfxJump() { // soft breathy exhale, not a tonal blip
     if (!audioReady) return; noiseBurst(audioCtx.currentTime, 0.18, 0.12, 'bandpass', 500, 1400, 1.2, 0.1);
 }
@@ -1064,7 +1077,7 @@ function infectBot(bot, infectorName) {
     if (bot.isInfected) return;
     bot.isInfected = true; bot.visualMesh.material[0].copy(infectedMaterial);
     survivorsLeft--; document.getElementById('survivors-count').innerText = survivorsLeft;
-    if (infectorName === "YOU") sfxYouInfected();
+    if (infectorName === "YOU") sfxYouInfected(); else sfxInfect();
     logFeed(`${infectorName} infected a Survivor!`, "#33ff33"); checkWinCondition();
 }
 
@@ -1089,6 +1102,7 @@ function infectMpPlayer(targetId, byName) {
     p.isInfected = true;
     if (p.mesh) p.mesh.visualMesh.material[0].copy(infectedMaterial);
     survivorsLeft--; document.getElementById('survivors-count').innerText = survivorsLeft;
+    sfxInfect();
     logFeed(`${byName} infected a Player!`, "#33ff33"); checkWinCondition();
 }
 
