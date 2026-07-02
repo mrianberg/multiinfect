@@ -519,12 +519,11 @@ function spawnBot(x, z) {
     bot.velocityY = 0; bot.isJumping = false; bot.mount = null; bot.hideout = null;
     bot.idleMode = 'wander'; bot.wanderDir = new THREE.Vector3((Math.random()-0.5)*2, 0, (Math.random()-0.5)*2).normalize();
     bot.targetPos = null; bot.climbTower = null; bot.climbIndex = 0; bot.climbStart = 0;
-    // Persistent personality so bots don't all do the same thing. Only a
-    // minority are inclined to climb towers; the rest roam or hole up in
-    // buildings. climbCooldown stops a climber re-entering a tower the instant
-    // it comes back down.
-    bot.likesClimbing = Math.random() < 0.22;
-    bot.roams = Math.random() < 0.5; // wanders wider, less interested in hiding
+    // Role is re-rolled every minute for surviving bots (85% roamer / 15%
+    // camper). Roamers wander the map and will climb a tower they pass with
+    // nobody else on it; campers hole up near a building. climbCooldown stops
+    // a bot re-entering a tower the instant it comes back down.
+    bot.role = Math.random() < 0.85 ? 'roamer' : 'camper';
     bot.climbCooldown = 0;
     // Only slot 0 (body colour) ever changes on infection, so clone just that
     // one and share the other three across all bots — fewer materials for the
@@ -647,7 +646,9 @@ function spawnTallTower(cx, cz) {
     if (woodGeos.length > 0) { const m = new THREE.Mesh(THREE.BufferGeometryUtils.mergeBufferGeometries(woodGeos), matWood); scene.add(m); buildingMeshes.push(m); }
 
     const base = new THREE.Vector3(cx, py, cz);
-    towers.push({ base, chain, entrance: chain[0] });
+    // climbers = how many bots are currently climbing this tower (so a roamer
+    // only engages a tower nobody else is on).
+    towers.push({ base, chain, entrance: chain[0], climbers: 0 });
     buildings.push({ position: base }); // still a hideout target for survivor AI
 }
 
@@ -1150,7 +1151,27 @@ function pickWanderDir(bot) {
     bot.wanderDir.set((Math.random()-0.5)*2, 0, (Math.random()-0.5)*2).normalize();
 }
 
+// Start/stop a climb, keeping the tower's live climber count in sync so only
+// one bot engages a given tower at a time. endClimb is safe to call twice.
+function startClimb(bot, tower, time) {
+    bot.climbTower = tower; bot.climbIndex = 0; bot.climbStart = time;
+    bot.targetPos = tower.chain[0].clone(); bot.hideout = null;
+    tower.climbers++;
+}
+function endClimb(bot, time) {
+    if (bot.climbTower) { bot.climbTower.climbers = Math.max(0, bot.climbTower.climbers - 1); bot.climbTower = null; }
+    if (time) bot.climbCooldown = time + 20000 + Math.random() * 15000;
+}
+
+let nextRoleRoll = 0;
+
 function updateBots(delta, time) {
+    // Every minute, re-roll the role of each surviving (non-infected) bot:
+    // 85% roamer, 15% camper.
+    if (time > nextRoleRoll) {
+        nextRoleRoll = time + 60000;
+        bots.forEach(b => { if (!b.isInfected) b.role = Math.random() < 0.85 ? 'roamer' : 'camper'; });
+    }
     let totalLanded = playerLanded ? 1 : 0;
     for (let i = 0; i < bots.length; i++) { if (bots[i].landed) totalLanded++; }
     if (GAME_MODE === 'multi') {
@@ -1220,6 +1241,7 @@ function updateBots(delta, time) {
     bots.forEach((bot, botIdx) => {
         // Bots owned by other players are replicated, not simulated
         if (GAME_MODE === 'multi' && !iOwnBot(botIdx)) {
+            if (bot.climbTower) endClimb(bot, 0); // ownership left us — release the tower slot
             if (bot.netTarget) {
                 const k = Math.min(1, delta * 10);
                 bot.position.lerp(bot.netTarget, k);
@@ -1238,7 +1260,7 @@ function updateBots(delta, time) {
             bot.wasReplicated = false;
             bot.velocityY = 0;
             bot.targetPos = null;
-            bot.climbTower = null;
+            endClimb(bot, 0);
             // Discard the previous owner's stale target so that if ownership
             // later flips back to a remote player we don't lerp toward it.
             bot.netTarget = null;
@@ -1271,8 +1293,7 @@ function updateBots(delta, time) {
                 // Safety valve: give up if no progress for 12s (any leftover
                 // geometry edge case) so a bot is never committed forever.
                 if (time - bot.climbStart > 12000) {
-                    bot.climbTower = null;
-                    bot.climbCooldown = time + 20000 + Math.random() * 15000;
+                    endClimb(bot, time);
                 } else {
                     const wp = chain[bot.climbIndex];
                     const dxz = Math.sqrt(Math.pow(bot.position.x - wp.x, 2) + Math.pow(bot.position.z - wp.z, 2));
@@ -1283,8 +1304,7 @@ function updateBots(delta, time) {
                             // Reached the top platform: leave climb mode; 40% of
                             // the time deliberately hop off the outer edge.
                             const towerBase = bot.climbTower.base;
-                            bot.climbTower = null;
-                            bot.climbCooldown = time + 20000 + Math.random() * 15000;
+                            endClimb(bot, time); // releases the tower slot + sets cooldown
                             if (Math.random() < 0.4) {
                                 let outDir = new THREE.Vector3(bot.position.x - towerBase.x, 0, bot.position.z - towerBase.z);
                                 if (outDir.lengthSq() < 1) outDir.set((Math.random()-0.5)*2, 0, (Math.random()-0.5)*2);
@@ -1302,22 +1322,21 @@ function updateBots(delta, time) {
                 }
             } else {
                 botsThinkingThisFrame++; bot.thinkTimer = time + 200 + Math.random() * 300;
-                // Engage a tower only when the bot has wandered right up to its
-                // entrance (chain[0]) — within 16u XZ and near the base height.
-                // Gated so bots don't all funnel up towers: only climber-
-                // personality survivors off cooldown, and only on a chance roll
-                // so even they don't all commit the instant they pass an
-                // entrance. Infected bots ignore towers entirely and keep
-                // hunting, so the horde doesn't pile onto the stairs.
+                // A roamer that wanders within 20u of a tower's entrance climbs
+                // it — but only if no other bot is already climbing that tower
+                // (tower.climbers === 0). That "one bot per tower" rule is what
+                // keeps them from swarming, replacing the old random gate.
+                // Infected bots never climb; they keep hunting.
                 let engageTower = null;
-                if (bot.landed && bot.likesClimbing && !bot.isInfected && time > bot.climbCooldown && Math.random() < 0.5) {
+                if (bot.landed && bot.role === 'roamer' && !bot.isInfected && time > bot.climbCooldown) {
                     for (const t of towers) {
+                        if (t.climbers > 0) continue;
                         const e = t.entrance;
                         const ddx = bot.position.x - e.x, ddz = bot.position.z - e.z;
-                        if (ddx*ddx + ddz*ddz < 256 && Math.abs(bot.position.y - e.y) < 12) { engageTower = t; break; }
+                        if (ddx*ddx + ddz*ddz < 400 && Math.abs(bot.position.y - e.y) < 12) { engageTower = t; break; }
                     }
                 }
-                if (engageTower) { bot.climbTower = engageTower; bot.climbIndex = 0; bot.climbStart = time; bot.targetPos = engageTower.chain[0].clone(); bot.hideout = null; }
+                if (engageTower) { startClimb(bot, engageTower, time); }
                 else if (bot.isInfected) {
                     bot.hideout = null;
                     let visibleTargetPos = null; const botEye = bot.position.clone().add(new THREE.Vector3(0, 10, 0));
@@ -1366,25 +1385,25 @@ function updateBots(delta, time) {
                         dangerVector.setY(0);
                         if (dangerVector.lengthSq() > 0.0001) bot.targetPos = bot.position.clone().add(dangerVector.normalize().multiplyScalar(100));
                     } else {
-                        // Roamers wander the map and rarely hole up; the rest are
-                        // campers that seek out a building to lurk near. This split
-                        // keeps bots visibly doing different things instead of all
-                        // funnelling to the same behaviour.
-                        const hideChance = bot.roams ? 0.05 : 0.35;
+                        // Roamers wander the map wide and rarely hole up; campers
+                        // seek out a building to lurk near. Role is re-rolled each
+                        // minute (85% roamer / 15% camper).
+                        const roamer = bot.role === 'roamer';
+                        const hideChance = roamer ? 0.05 : 0.35;
                         if (!bot.hideout && Math.random() < hideChance) {
                             let nearestB = null; let minB = Infinity;
                             buildings.forEach(b => { let d = bot.position.distanceToSquared(b.position); if (d < minB) { minB = d; nearestB = b; } });
                             if (nearestB) bot.hideout = (nearestB.position || nearestB).clone();
                         }
-                        // Campers occasionally give up their spot and move on so
-                        // they don't freeze in place forever.
-                        if (bot.hideout && Math.random() < 0.02) bot.hideout = null;
+                        // Give up a hideout occasionally (or immediately if the
+                        // role flipped to roamer this minute) so bots don't freeze.
+                        if (bot.hideout && (roamer || Math.random() < 0.02)) bot.hideout = null;
                         if (bot.hideout) {
                             bot.targetPos = bot.hideout;
                             if (bot.position.distanceToSquared(bot.hideout) < 200) bot.targetPos = bot.position;
                         } else {
                             if (Math.random() < 0.15) pickWanderDir(bot);
-                            bot.targetPos = bot.position.clone().add(bot.wanderDir.clone().multiplyScalar(bot.roams ? 90 : 50));
+                            bot.targetPos = bot.position.clone().add(bot.wanderDir.clone().multiplyScalar(roamer ? 90 : 50));
                         }
                     }
                 }
