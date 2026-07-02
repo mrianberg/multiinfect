@@ -475,8 +475,12 @@ function spawnTallTower(cx, cz) {
             for (let i = 0; i < 8; i++) { let y = (yLvl-12)+2+(i*(12/8)); addB(16,4,16,-22+(i*5.5),y,22,true); }
         }
     }
-    if (stoneGeos.length > 0) { scene.add(new THREE.Mesh(THREE.BufferGeometryUtils.mergeBufferGeometries(stoneGeos), matStone)); }
-    if (woodGeos.length > 0) { scene.add(new THREE.Mesh(THREE.BufferGeometryUtils.mergeBufferGeometries(woodGeos), matWood)); }
+    // Register the merged meshes in buildingMeshes (used to build the AI
+    // whisker/vision raycast list). These were previously added to the scene
+    // only — invisible to bot obstacle-avoidance, so bots would walk straight
+    // into tower posts/stairs with no whisker warning and get stuck.
+    if (stoneGeos.length > 0) { const m = new THREE.Mesh(THREE.BufferGeometryUtils.mergeBufferGeometries(stoneGeos), matStone); scene.add(m); buildingMeshes.push(m); }
+    if (woodGeos.length > 0) { const m = new THREE.Mesh(THREE.BufferGeometryUtils.mergeBufferGeometries(woodGeos), matWood); scene.add(m); buildingMeshes.push(m); }
     buildings.push({ position: new THREE.Vector3(cx, py, cz) });
 }
 
@@ -860,6 +864,8 @@ const radarCanvas = document.getElementById('radar');
 const radarCtx = radarCanvas.getContext('2d');
 const RADAR_RANGE = 800;
 
+const STORM_PREVIEW_SECONDS = 30; // how far ahead the radar's "next circle" ring looks
+
 function updateRadar() {
     radarCtx.clearRect(0, 0, 160, 160);
     const scale = 80 / RADAR_RANGE;
@@ -872,6 +878,17 @@ function updateRadar() {
         radarCtx.beginPath(); radarCtx.arc(80 + sDx * scale, 80 + sDz * scale, Math.max(0, stormRadius * scale), 0, Math.PI * 2); radarCtx.fill();
         radarCtx.globalCompositeOperation = 'source-over';
         radarCtx.strokeStyle = '#8800ff'; radarCtx.lineWidth = 2; radarCtx.stroke();
+
+        // Dashed preview ring: where the wall will be in ~30s, so players can
+        // plan their route before the storm actually gets there.
+        const elapsed = matchStartMs ? (performance.now() - matchStartMs) / 1000 : 0;
+        const futureRadius = stormStateAt(elapsed + STORM_PREVIEW_SECONDS).radius;
+        if (futureRadius < stormRadius - 1) {
+            radarCtx.setLineDash([4, 3]);
+            radarCtx.strokeStyle = '#ff66ff'; radarCtx.lineWidth = 1.5;
+            radarCtx.beginPath(); radarCtx.arc(80 + sDx * scale, 80 + sDz * scale, Math.max(0, futureRadius * scale), 0, Math.PI * 2); radarCtx.stroke();
+            radarCtx.setLineDash([]);
+        }
     }
     radarCtx.fillStyle = playerIsInfected ? '#33ff33' : '#ff3333';
     radarCtx.beginPath(); radarCtx.arc(80, 80, 5, 0, Math.PI * 2); radarCtx.fill();
@@ -948,12 +965,12 @@ function smoothLookAt(bot, targetPos, turnSpeed, delta) {
     bot.quaternion.slerp(smoothTurnDummy.quaternion, delta * turnSpeed);
 }
 
-// Picks a new wander direction for an idle bot. 15% of the time (only once
+// Picks a new wander direction for an idle bot. 30% of the time (only once
 // the storm exists) it heads toward the storm's center instead of a fully
 // random heading — a gentle pull inward rather than a hard "stay off the
 // wall" rule, so bots still roam right up to the edge.
 function pickWanderDir(bot) {
-    if (gamePhase === 'active' && Math.random() < 0.15) {
+    if (gamePhase === 'active' && Math.random() < 0.3) {
         const dx = stormCenter.x - bot.position.x, dz = stormCenter.z - bot.position.z;
         const distSq = dx * dx + dz * dz;
         if (distSq > 1) { bot.wanderDir.set(dx, 0, dz).normalize(); return; }
