@@ -13,12 +13,12 @@
     }
     #loading-title { font-size: 55px; color: #33ff33; margin-bottom: 20px; text-shadow: 2px 2px 0px #000; text-align: center; font-style: italic; }
     #loading-bar-container { width: 50%; height: 25px; background: rgba(255,255,255,0.1); border: 3px solid #fff; border-radius: 5px; overflow: hidden;}
-    #loading-bar { width: 0%; height: 100%; background: #33ff33; transition: width 0.1s ease; }
+    #loading-bar { width: 0%; height: 100%; background: linear-gradient(90deg, #22cc22, #55ff55); box-shadow: 0 0 12px rgba(51,255,51,0.6); transition: width 0.1s ease; }
     #loading-text { margin-top: 15px; font-size: 20px; font-style: italic; color: #aaa;}
     #top-ui {
         position: absolute; top: 20px; width: 100%; text-align: center;
         font-size: 45px; color: white; font-family: 'Arial Black', sans-serif;
-        text-shadow: 3px 3px 0 #000; z-index: 100; pointer-events: none;
+        text-shadow: 3px 3px 0 #000, 0 0 18px rgba(255,255,255,0.25); z-index: 100; pointer-events: none;
     }
     #phase-alert {
         /* Tucked directly under the radar (top:20 + 160 tall) so it stays out of the way */
@@ -34,19 +34,26 @@
         color: white; text-shadow: 3px 3px 0px #000;
         z-index: 100; pointer-events: none;
     }
-    .ui-element { background: rgba(0, 0, 0, 0.6); padding: 15px 30px; border-radius: 8px; border-bottom: 5px solid #ff3333; font-size: 35px; }
+    .ui-element {
+        background: rgba(0, 0, 0, 0.55); backdrop-filter: blur(3px); -webkit-backdrop-filter: blur(3px);
+        padding: 15px 30px; border-radius: 8px; border-bottom: 5px solid #ff3333; font-size: 35px;
+        box-shadow: 0 2px 10px rgba(0,0,0,0.4);
+    }
     #status-box { color: #ff3333; }
     #survivors-box { color: #ffffff; border-bottom-color: #aaaaaa; }
     #radar {
         position: absolute; top: 20px; right: 20px; width: 160px; height: 160px;
         background: rgba(0, 0, 0, 0.6); border: 3px solid rgba(255, 255, 255, 0.4);
         border-radius: 50%; z-index: 100; pointer-events: none; overflow: hidden;
+        box-shadow: 0 2px 14px rgba(0,0,0,0.5);
     }
     #killfeed {
         position: absolute; top: 20px; left: 40px;
         font-size: 18px; font-family: 'Arial', sans-serif; font-weight: bold; color: white;
         text-shadow: 1px 1px 2px #000; display: flex; flex-direction: column; gap: 5px;
     }
+    @keyframes kfFadeIn { from { opacity: 0; transform: translateX(-8px); } to { opacity: 1; transform: translateX(0); } }
+    .kf-item { animation: kfFadeIn 0.25s ease-out; transition: opacity 0.6s ease; }
     #damage-overlay {
         position: absolute; top: 0; left: 0; width: 100%; height: 100%;
         background-color: rgba(34, 255, 34, 0.5); pointer-events: none;
@@ -60,7 +67,15 @@
         color: white; font-family: 'Arial Black', sans-serif; cursor: pointer;
         transition: background-color 0.5s ease;
     }
-    h1 { font-size: 70px; margin: 0; text-shadow: 3px 3px 0px #000; color: #33ff33; text-align: center; text-transform: uppercase;}
+    h1 {
+        font-size: 70px; margin: 0; color: #33ff33; text-align: center; text-transform: uppercase;
+        text-shadow: 3px 3px 0px #000, 0 0 24px rgba(51,255,51,0.35);
+        animation: titlePulse 3s ease-in-out infinite;
+    }
+    @keyframes titlePulse {
+        0%, 100% { text-shadow: 3px 3px 0px #000, 0 0 24px rgba(51,255,51,0.35); }
+        50% { text-shadow: 3px 3px 0px #000, 0 0 36px rgba(51,255,51,0.55); }
+    }
     p { font-size: 22px; text-align: center; color: #ccc;}
     #victory { display: none; font-size: 60px; text-shadow: 3px 3px 0px #000; margin-bottom: 20px;}
     #back-to-lobby {
@@ -171,11 +186,35 @@ const renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'h
 renderer.setSize(window.innerWidth, window.innerHeight);
 document.body.appendChild(renderer.domElement);
 
-const ambientLight = new THREE.AmbientLight(0xffffff, 0.4);
+// Hemisphere light (sky colour from above, warm ground bounce from below)
+// reads far more natural on the flat Lambert materials than a plain ambient
+// light did — same render cost, much less "flat plastic" look.
+const ambientLight = new THREE.HemisphereLight(0x88aaff, 0x3a2f1c, 0.55);
 scene.add(ambientLight);
-const dirLight = new THREE.DirectionalLight(0xffeedd, 0.6);
+const dirLight = new THREE.DirectionalLight(0xffeedd, 0.75);
 dirLight.position.set(200, 1000, -100);
 scene.add(dirLight);
+
+// Soft sun glow — a single additive sprite, practically free to render and
+// gives the sky a focal point without any post-processing.
+const sunSprite = (() => {
+    const canvas = document.createElement('canvas');
+    canvas.width = 128; canvas.height = 128;
+    const ctx = canvas.getContext('2d');
+    const g = ctx.createRadialGradient(64, 64, 0, 64, 64, 64);
+    g.addColorStop(0, 'rgba(255,250,230,0.9)');
+    g.addColorStop(0.4, 'rgba(255,240,200,0.35)');
+    g.addColorStop(1, 'rgba(255,240,200,0)');
+    ctx.fillStyle = g; ctx.fillRect(0, 0, 128, 128);
+    const tex = new THREE.CanvasTexture(canvas);
+    const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending });
+    const sprite = new THREE.Sprite(mat);
+    sprite.scale.set(600, 600, 1);
+    const dir = dirLight.position.clone().normalize();
+    sprite.position.copy(dir.multiplyScalar(3000));
+    scene.add(sprite);
+    return sprite;
+})();
 
 // ─── Game state ───────────────────────────────────────────────────────────────
 let gamePhase = 'dropping';
@@ -523,18 +562,25 @@ for (let c = 0; c < 2; c++) {
     });
 }
 
+const baseLeavesColor = new THREE.Color(0x112b1a);
 for (let c = 0; c < 2; c++) {
     addTask(`Planting Dense Woods ${c+1}/2`, () => {
         const treeTrunkGeo = new THREE.CylinderGeometry(3.0, 4.0, 35, 6);
         const treeLeavesGeo = new THREE.ConeGeometry(22, 60, 6);
         const trunkMat = new THREE.MeshLambertMaterial({ color: 0x221811 });
-        const leavesMat = new THREE.MeshLambertMaterial({ color: 0x112b1a });
         for (let i = 0; i < 100; i++) {
             let attempts = 0;
             while (attempts < 100) {
                 const tx = (wrand()-0.5)*4400; const tz = (wrand()-0.5)*4400;
                 if (!checkEnvCollision(tx, tz, 10)) {
                     const ty = getTerrainHeight(tx, tz);
+                    // Subtle per-tree colour variance (seeded, so every client's
+                    // forest looks identical) breaks up the flat, uniform green.
+                    const leavesMat = new THREE.MeshLambertMaterial({ color: baseLeavesColor.clone() });
+                    const hueShift = (wrand() - 0.5) * 0.05;
+                    const lightShift = (wrand() - 0.5) * 0.12;
+                    let hsl = { h: 0, s: 0, l: 0 }; leavesMat.color.getHSL(hsl);
+                    leavesMat.color.setHSL(hsl.h + hueShift, hsl.s, Math.max(0.05, hsl.l + lightShift));
                     const trunk = new THREE.Mesh(treeTrunkGeo, trunkMat); trunk.position.set(tx, ty+17.5, tz);
                     const leaves = new THREE.Mesh(treeLeavesGeo, leavesMat); leaves.position.set(tx, ty+50, tz);
                     scene.add(trunk); scene.add(leaves); treeMeshes.push(trunk, leaves);
@@ -643,7 +689,8 @@ function logFeed(msg, color) {
     if (killCount >= 6) return;
     killCount++;
     const feed = document.getElementById('killfeed'); const item = document.createElement('div');
-    item.innerText = msg; item.style.color = color; feed.appendChild(item);
+    item.innerText = msg; item.style.color = color; item.className = 'kf-item'; feed.appendChild(item);
+    setTimeout(() => { item.style.opacity = '0'; }, 3300);
     setTimeout(() => { item.remove(); killCount--; }, 4000);
 }
 
@@ -1187,8 +1234,9 @@ function animate() {
         nightFadeProgress += delta * 0.2;
         scene.background.lerpColors(dayColor, nightColor, nightFadeProgress);
         scene.fog.color.copy(scene.background);
-        ambientLight.intensity = THREE.MathUtils.lerp(0.4, 0.2, nightFadeProgress);
-        dirLight.intensity = THREE.MathUtils.lerp(0.6, 0.3, nightFadeProgress);
+        ambientLight.intensity = THREE.MathUtils.lerp(0.55, 0.22, nightFadeProgress);
+        dirLight.intensity = THREE.MathUtils.lerp(0.75, 0.3, nightFadeProgress);
+        sunSprite.material.opacity = 1 - nightFadeProgress;
     }
 
     if (gamePhase === 'active') {
