@@ -477,17 +477,22 @@ function spawnTallTower(cx, cz) {
         // +1 = shaft on the south edge (z>0), -1 = north edge (z<0) — flips
         // every floor.
         const dir = (floorNum % 2 === 1) ? 1 : -1;
-        // Both waypoints target this floor's height (same convention as
-        // before — a waypoint is "the next floor up"), but now sit at the
-        // ramp's entrance and exit x/z instead of a diagonal corner, so a
-        // climbing bot's target pulls it straight into the shaft.
-        globalWaypoints.push(new THREE.Vector3(cx, py + yLvl, cz + dir * (6 + STEP_DEPTH / 2)));
-        globalWaypoints.push(new THREE.Vector3(cx, py + yLvl, cz + dir * (6 + GAP_DEPTH - STEP_DEPTH / 2)));
-
         if (floorNum === 5) {
+            // Top floor is a solid roof cap with no stairway leading into it
+            // (matches the original design). No waypoints here — bots used
+            // to target this floor's waypoint after finishing floor 4's
+            // climb, then walk straight into the solid underside with no
+            // opening to pass through, endlessly bumping against the
+            // "ceiling" since there was never a way up.
             addB(s, 2, s, 0, yLvl, 0, true);
             addB(s+10, 4, s+10, 0, yLvl+8, 0, false);
         } else {
+            // Both waypoints target this floor's height (same convention as
+            // before — a waypoint is "the next floor up"), but now sit at the
+            // ramp's entrance and exit x/z instead of a diagonal corner, so a
+            // climbing bot's target pulls it straight into the shaft.
+            globalWaypoints.push(new THREE.Vector3(cx, py + yLvl, cz + dir * (6 + STEP_DEPTH / 2)));
+            globalWaypoints.push(new THREE.Vector3(cx, py + yLvl, cz + dir * (6 + GAP_DEPTH - STEP_DEPTH / 2)));
             // Solid floor everywhere except the stairwell shaft.
             addB(s, 2, s - GAP_DEPTH, 0, yLvl, -dir * GAP_DEPTH/2, true);                                     // opposite the shaft
             addB((s - RAMP_W)/2, 2, GAP_DEPTH, -(RAMP_W + (s-RAMP_W)/2)/2, yLvl, dir * (s/2 - GAP_DEPTH/2), true); // shaft's west flank
