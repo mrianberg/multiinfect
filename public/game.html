@@ -85,7 +85,7 @@
     <div id="victory">GAME OVER</div>
     <h1 id="game-title">INFECTION TAG</h1>
     <p id="instructions">Click to Deploy<br><br>(WASD: Glide/Run | SPACE: Jump | E: Mount Horse)<br><br>Beware the Storm.</p>
-    <button id="back-to-lobby" onclick="window.location.href='/login/game.php?g=multiinfect'">BACK TO LOBBY</button>
+    <button id="back-to-lobby">BACK TO LOBBY</button>
 </div>
 
 <div id="top-ui">TIME: <span id="timer">05:00</span></div>
@@ -109,8 +109,19 @@ const MY_NAME   = urlParams.get('name') || 'Player';
 // ─── Multiplayer setup ────────────────────────────────────────────────────────
 let socket = null;
 let mpPlayers = {}; // id → { mesh, isInfected, isGliding, landed, targetPos, targetRotY, name }
-// The room host simulates bot AI and broadcasts positions; other clients replicate.
-let iAmBotHost = false;
+
+// Bot simulation is split across all real players: bot i is simulated by
+// the player at position (i % playerCount) in the sorted id list, and
+// replicated by everyone else. If a player leaves, their bots redistribute
+// automatically because every client recomputes the same assignment.
+function sortedPlayerIds() {
+    return Object.keys(mpPlayers).concat([socket.id]).sort();
+}
+function iOwnBot(i) {
+    if (GAME_MODE !== 'multi') return true;
+    const ids = sortedPlayerIds();
+    return ids[i % ids.length] === socket.id;
+}
 
 if (GAME_MODE === 'multi') {
     socket = io();
@@ -477,13 +488,16 @@ addTask("Spawning Horses", () => {
     }
 });
 
-// In multiplayer, spawn fewer bots (bots fill remaining slots up to 40)
-const BOT_COUNT = GAME_MODE === 'multi' ? 10 : 40;
-const botsPerTask = Math.ceil(BOT_COUNT / 4);
+// Bots fill the match to 41 total (players + bots). In multi the server
+// locks in the player count at game start so every client spawns the same
+// number; solo is 1 player + 40 bots. (Set before loading begins.)
+let BOT_COUNT = 40;
 for (let c = 0; c < 4; c++) {
     addTask(`Loading Battle Bus ${c+1}/4`, () => {
-        const count = (c < 3) ? botsPerTask : (BOT_COUNT - botsPerTask * 3);
-        for (let i = 0; i < count; i++) { let p = getSafeSpawnPos(wrand); spawnBot(p.x, p.z); }
+        const per = Math.ceil(BOT_COUNT / 4);
+        const start = c * per;
+        const end = Math.min(BOT_COUNT, start + per);
+        for (let i = start; i < end; i++) { let p = getSafeSpawnPos(wrand); spawnBot(p.x, p.z); }
     });
 }
 
@@ -733,6 +747,15 @@ function updateRadar() {
     radarCtx.restore();
 }
 
+// ─── Back button: multi returns to the room's ready-up screen ────────────────
+const backBtn = document.getElementById('back-to-lobby');
+if (GAME_MODE === 'multi') backBtn.innerText = 'BACK TO ROOM';
+backBtn.addEventListener('click', () => {
+    window.location.href = GAME_MODE === 'multi'
+        ? `/login/game.php?g=multiinfect&room=${ROOM_ID}&name=${encodeURIComponent(MY_NAME)}`
+        : '/login/game.php?g=multiinfect';
+});
+
 // ─── Controls ─────────────────────────────────────────────────────────────────
 const controls = new THREE.PointerLockControls(camera, document.body);
 const blocker = document.getElementById('blocker');
@@ -800,12 +823,13 @@ function updateBots(delta, time) {
                     if (GAME_MODE === 'multi' && socket) socket.emit('bot_infected', { index: i, byName: MY_NAME });
                 }
             }
-            // Bot vs bot contact — host-authoritative in multi (each spread is
-            // decided once and broadcast, keeping survivor counts in sync)
-            if (b1.isInfected && (GAME_MODE !== 'multi' || iAmBotHost)) {
+            // Bot vs bot contact — in multi, the owner of the VICTIM bot
+            // decides the spread, so each infection happens exactly once
+            if (b1.isInfected) {
                 for (let j = 0; j < bots.length; j++) {
                     let b2 = bots[j];
-                    if (!b2.isInfected && b1.position.distanceToSquared(b2.position) < 75) {
+                    if (b2.isInfected || (GAME_MODE === 'multi' && !iOwnBot(j))) continue;
+                    if (b1.position.distanceToSquared(b2.position) < 75) {
                         infectBot(b2, "Infected Horde");
                         if (GAME_MODE === 'multi' && socket) socket.emit('bot_infected', { index: j, byName: "Infected Horde" });
                     }
@@ -840,24 +864,29 @@ function updateBots(delta, time) {
         if (time > phaseTimer) triggerFirstInfection();
     }
 
-    // Non-host clients don't run bot AI — they smoothly replicate the
-    // positions broadcast by the host, so every player sees the same bots.
-    if (GAME_MODE === 'multi' && !iAmBotHost) {
-        const k = Math.min(1, delta * 10);
-        bots.forEach(bot => {
-            if (!bot.netTarget) return; // no host data yet (host still loading)
-            bot.position.lerp(bot.netTarget, k);
-            let d = (bot.netRotY || 0) - bot.rotation.y;
-            d = Math.atan2(Math.sin(d), Math.cos(d));
-            bot.rotation.y += d * k;
-            if (bot.gliderRef.visible !== bot.netGliding) bot.gliderRef.visible = bot.netGliding;
-            if (!bot.netGliding && bot.isGliding) { bot.isGliding = false; bot.landed = true; }
-        });
-        return;
-    }
-
     let botsThinkingThisFrame = 0;
-    bots.forEach(bot => {
+    bots.forEach((bot, botIdx) => {
+        // Bots owned by other players are replicated, not simulated
+        if (GAME_MODE === 'multi' && !iOwnBot(botIdx)) {
+            if (bot.netTarget) {
+                const k = Math.min(1, delta * 10);
+                bot.position.lerp(bot.netTarget, k);
+                let d = (bot.netRotY || 0) - bot.rotation.y;
+                d = Math.atan2(Math.sin(d), Math.cos(d));
+                bot.rotation.y += d * k;
+                if (bot.gliderRef.visible !== bot.netGliding) bot.gliderRef.visible = bot.netGliding;
+                if (!bot.netGliding && bot.isGliding) { bot.isGliding = false; bot.landed = true; }
+            }
+            bot.wasReplicated = true;
+            return;
+        }
+        // Taking over a bot (its owner left): continue from its replicated spot
+        if (bot.wasReplicated) {
+            if (bot.netTarget) bot.position.copy(bot.netTarget);
+            bot.wasReplicated = false;
+            bot.velocityY = 0;
+            bot.targetPos = null;
+        }
         const currentFeetY = bot.position.y;
         const targetFloorY = getFloorHeight(bot.position.x, bot.position.z, currentFeetY);
         if (bot.isGliding) {
@@ -1096,14 +1125,20 @@ function animate() {
         }
     }
 
-    // Host streams bot positions to the room (runs even while paused, so
-    // other players' bots keep moving)
-    if (GAME_MODE === 'multi' && socket && iAmBotHost && bots.length > 0 && time - lastBotSend > BOT_SEND_INTERVAL) {
+    // Stream the bots THIS client simulates to the room (runs even while
+    // paused, so everyone's bots keep moving)
+    if (GAME_MODE === 'multi' && socket && bots.length > 0 && time - lastBotSend > BOT_SEND_INTERVAL) {
         lastBotSend = time;
-        socket.emit('bots_state', bots.map(b => [
-            +b.position.x.toFixed(1), +b.position.y.toFixed(1), +b.position.z.toFixed(1),
-            +b.rotation.y.toFixed(2), b.isGliding ? 1 : 0
-        ]));
+        const state = [];
+        for (let i = 0; i < bots.length; i++) {
+            if (!iOwnBot(i)) continue;
+            const b = bots[i];
+            state.push([i,
+                +b.position.x.toFixed(1), +b.position.y.toFixed(1), +b.position.z.toFixed(1),
+                +b.rotation.y.toFixed(2), b.isGliding ? 1 : 0
+            ]);
+        }
+        if (state.length > 0) socket.emit('bots_state', state);
     }
 
     updateBots(delta, time); updateHorses(delta, time); updateMpPlayers(delta); updateRadar();
@@ -1155,29 +1190,25 @@ if (GAME_MODE === 'multi' && socket) {
         }
     });
 
-    // Replicated bot positions from the host
+    // Replicated bot positions from their owning players
     socket.on('bots_state', (arr) => {
         if (!Array.isArray(arr)) return;
-        for (let i = 0; i < arr.length && i < bots.length; i++) {
-            const s = arr[i]; const bot = bots[i];
+        arr.forEach(s => {
+            const i = s[0]; const bot = bots[i];
+            if (!bot || iOwnBot(i)) return; // ignore stale claims for bots I simulate
             if (!bot.netTarget) {
-                bot.netTarget = new THREE.Vector3(s[0], s[1], s[2]);
+                bot.netTarget = new THREE.Vector3(s[1], s[2], s[3]);
                 bot.position.copy(bot.netTarget); // snap on first packet
             } else {
-                bot.netTarget.set(s[0], s[1], s[2]);
+                bot.netTarget.set(s[1], s[2], s[3]);
             }
-            bot.netRotY = s[3]; bot.netGliding = !!s[4];
-        }
+            bot.netRotY = s[4]; bot.netGliding = !!s[5];
+        });
     });
 
     // A bot was tagged somewhere in the room
     socket.on('bot_infected', ({ index, byName }) => {
         if (bots[index]) infectBot(bots[index], byName || 'Infected Horde');
-    });
-
-    // Bot-simulation host changed (previous host left)
-    socket.on('new_host', ({ id }) => {
-        iAmBotHost = (id === socket.id);
     });
 
     socket.on('game_over', ({ result }) => {
@@ -1211,7 +1242,8 @@ if (GAME_MODE === 'multi' && socket) {
             return;
         }
         WORLD_SEED = res.seed >>> 0;
-        iAmBotHost = (res.hostId === socket.id);
+        // Fill the match to 41 total entities (same count on every client)
+        BOT_COUNT = Math.max(0, 41 - (res.matchPlayers || 1));
         // Pre-register players already in the room so meshes + survivor
         // counts are correct from the start.
         (res.players || []).forEach(p => {

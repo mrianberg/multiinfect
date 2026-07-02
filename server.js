@@ -21,7 +21,7 @@ function generateRoomId() {
 function getRoomList() {
     const list = [];
     for (const [id, room] of rooms) {
-        if (room.state === 'lobby') {
+        if (room.state === 'lobby' && room.players.size > 0) {
             list.push({
                 id,
                 name: room.name,
@@ -110,7 +110,11 @@ io.on('connection', (socket) => {
 
         // Tell the joining player about existing players
         const playerList = Array.from(room.players.values());
-        callback({ ok: true, roomId, players: playerList, hostId: room.hostId, seed: room.seed });
+        callback({
+            ok: true, roomId, players: playerList, hostId: room.hostId,
+            seed: room.seed, name: room.name,
+            matchPlayers: room.matchPlayerCount || room.players.size,
+        });
 
         // Tell everyone else in the room
         socket.to(roomId).emit('player_joined', {
@@ -133,6 +137,11 @@ io.on('connection', (socket) => {
         const room = rooms.get(socket.roomId);
         if (!room || room.hostId !== socket.id) return;
         room.state = 'ingame';
+        // Fresh state for this match: new map seed, clean bot-infection log,
+        // and lock in the player count so every client spawns 41-N bots.
+        room.seed = (Math.random() * 4294967296) >>> 0;
+        room.botsInfected = new Set();
+        room.matchPlayerCount = room.players.size;
         broadcastRoomList();
         io.to(socket.roomId).emit('game_start');
     });
@@ -156,10 +165,11 @@ io.on('connection', (socket) => {
         });
     });
 
-    // Host broadcasts bot positions; everyone else replicates them
+    // Each player broadcasts the slice of bots they simulate;
+    // everyone else replicates those bots
     socket.on('bots_state', (data) => {
         const room = rooms.get(socket.roomId);
-        if (!room || room.state !== 'ingame' || room.hostId !== socket.id) return;
+        if (!room || room.state !== 'ingame' || !room.players.has(socket.id)) return;
         socket.to(socket.roomId).volatile.emit('bots_state', data);
     });
 
@@ -197,23 +207,31 @@ io.on('connection', (socket) => {
     socket.on('game_over', (result) => {
         const room = rooms.get(socket.roomId);
         if (!room || room.hostId !== socket.id) return;
-        room.state = 'ended';
+        // Return the room to the lobby so the group can play again
+        room.state = 'lobby';
+        for (const p of room.players.values()) {
+            p.ready = false;
+            p.isInfected = false;
+        }
         io.to(socket.roomId).emit('game_over', result);
+        broadcastRoomList();
     });
 
-    socket.on('disconnect', () => {
+    function leaveCurrentRoom() {
         const roomId = socket.roomId;
         if (!roomId) return;
         const room = rooms.get(roomId);
+        socket.roomId = null;
         if (!room) return;
+        socket.leave(roomId);
         room.players.delete(socket.id);
         io.to(roomId).emit('player_left', { id: socket.id });
 
         if (room.players.size === 0) {
-            // Keep empty ingame rooms briefly — players reconnect while navigating
-            // from the lobby page to the game page.
-            if (room.state !== 'ingame') rooms.delete(roomId);
-            else room.emptySince = Date.now();
+            // Keep empty rooms briefly — players page-navigate between the
+            // lobby and game screens and reconnect; the sweep below removes
+            // rooms that stay empty.
+            room.emptySince = Date.now();
         } else if (room.hostId === socket.id) {
             // Pass host to next player
             const nextPlayer = room.players.values().next().value;
@@ -224,7 +242,10 @@ io.on('connection', (socket) => {
             }
         }
         broadcastRoomList();
-    });
+    }
+
+    socket.on('leave_room', leaveCurrentRoom);
+    socket.on('disconnect', leaveCurrentRoom);
 });
 
 // Sweep abandoned ingame rooms (empty for over 2 minutes)

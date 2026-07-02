@@ -241,13 +241,16 @@ socket.on('room_list', (list) => {
 
 function joinRoom(roomId) {
   socket.emit('join_room', roomId, (res) => {
-    if (!res.ok) return alert(res.error);
+    if (!res.ok) {
+      alert(res.error);
+      if (myName) showOnly(mainMenu);
+      return;
+    }
     myRoomId = res.roomId;
     myHostId = res.hostId;
     players = {};
     res.players.forEach(p => { players[p.id] = p; });
-    const room = document.getElementById('lobby-room-name'); // will be overwritten
-    enterLobby(players[myHostId]?.name + "'s Game", roomId);
+    enterLobby(res.name || (players[myHostId]?.name + "'s Game"), roomId);
   });
 }
 
@@ -258,6 +261,8 @@ function enterLobby(roomName, roomId) {
   document.getElementById('start-btn').style.display = socket.id === myHostId ? 'block' : 'none';
   document.getElementById('ready-btn').style.display = socket.id === myHostId ? 'none' : 'block';
   isReady = false;
+  document.getElementById('ready-btn').innerText = 'READY UP';
+  document.getElementById('ready-btn').style.background = '#33ff33';
   renderPlayerList();
   showOnly(pregameLobby);
 }
@@ -297,6 +302,7 @@ document.getElementById('start-btn').addEventListener('click', () => {
 });
 
 document.getElementById('leave-btn').addEventListener('click', () => {
+  socket.emit('leave_room');
   myRoomId = null; myHostId = null; players = {};
   socket.emit('get_rooms');
   showOnly(mainMenu);
@@ -339,6 +345,17 @@ setInterval(() => {
 
 function escHtml(str) {
   return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// Returning from a finished game: rejoin the same room's ready-up screen
+const urlParams = new URLSearchParams(window.location.search);
+const returnRoom = urlParams.get('room');
+const returnName = urlParams.get('name');
+if (returnRoom && returnName) {
+  myName = returnName;
+  document.getElementById('name-input').value = myName;
+  socket.emit('set_name', myName);
+  joinRoom(returnRoom);
 }
 </script>
 </body>
