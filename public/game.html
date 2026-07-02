@@ -21,9 +21,10 @@
         text-shadow: 3px 3px 0 #000; z-index: 100; pointer-events: none;
     }
     #phase-alert {
-        position: absolute; top: 80px; width: 100%; text-align: center;
-        font-size: 30px; color: #ffcc00; font-family: 'Arial Black', sans-serif;
-        text-shadow: 2px 2px 0 #000; z-index: 100; pointer-events: none; display: none;
+        /* Tucked directly under the radar (top:20 + 160 tall) so it stays out of the way */
+        position: absolute; top: 188px; right: 20px; width: 160px; text-align: center;
+        font-size: 14px; color: #ffcc00; font-family: 'Arial Black', sans-serif;
+        text-shadow: 1px 1px 0 #000; z-index: 100; pointer-events: none; display: none;
     }
     #ui-container {
         position: absolute; bottom: 30px; width: 100%;
@@ -345,15 +346,17 @@ const horseMaterial = new THREE.MeshLambertMaterial({ color: 0x333333 });
 function makeNameSprite(name) {
     const label = String(name || 'Player').slice(0, 16);
     const canvas = document.createElement('canvas');
-    canvas.width = 256; canvas.height = 64;
+    // Higher-res canvas so the enlarged tag stays crisp.
+    canvas.width = 512; canvas.height = 128;
     const ctx = canvas.getContext('2d');
-    ctx.font = 'bold 38px Arial'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    ctx.lineWidth = 7; ctx.strokeStyle = 'rgba(0,0,0,0.85)'; ctx.strokeText(label, 128, 32);
-    ctx.fillStyle = '#ffffff'; ctx.fillText(label, 128, 32);
+    ctx.font = 'bold 76px Arial'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.lineWidth = 14; ctx.strokeStyle = 'rgba(0,0,0,0.85)'; ctx.strokeText(label, 256, 64);
+    ctx.fillStyle = '#ffffff'; ctx.fillText(label, 256, 64);
     const tex = new THREE.CanvasTexture(canvas); tex.minFilter = THREE.LinearFilter;
     const mat = new THREE.SpriteMaterial({ map: tex, depthTest: false, depthWrite: false, transparent: true });
     const sprite = new THREE.Sprite(mat);
-    sprite.scale.set(24, 6, 1); sprite.position.set(0, 20, 0); sprite.renderOrder = 999;
+    // 3x the previous size (was 24x6).
+    sprite.scale.set(72, 18, 1); sprite.position.set(0, 26, 0); sprite.renderOrder = 999;
     return sprite;
 }
 
@@ -1318,7 +1321,7 @@ if (GAME_MODE === 'multi' && socket) {
             // bots sit when mounted); keep the name tag above their head.
             entry.mesh.horseRef.visible = !!mounted && !isGliding;
             entry.mesh.visualMesh.position.y = mounted ? 10 : 0;
-            entry.mesh.nameRef.position.y = mounted ? 30 : 20;
+            entry.mesh.nameRef.position.y = mounted ? 36 : 26;
         }
     });
 
