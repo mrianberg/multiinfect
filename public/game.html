@@ -54,6 +54,11 @@
     }
     @keyframes kfFadeIn { from { opacity: 0; transform: translateX(-8px); } to { opacity: 1; transform: translateX(0); } }
     .kf-item { animation: kfFadeIn 0.25s ease-out; transition: opacity 0.6s ease; }
+    #audio-hint {
+        position: absolute; bottom: 12px; right: 16px; z-index: 100; pointer-events: none;
+        font-family: 'Arial', sans-serif; font-size: 13px; color: #aaa;
+        text-shadow: 1px 1px 2px #000; opacity: 0; transition: opacity 0.8s ease;
+    }
     #damage-overlay {
         position: absolute; top: 0; left: 0; width: 100%; height: 100%;
         background-color: rgba(34, 255, 34, 0.5); pointer-events: none;
@@ -107,6 +112,7 @@
 <div id="top-ui">TIME: <span id="timer">05:00</span></div>
 <div id="phase-alert" style="display: none;">INFECTION IN: 0</div>
 <canvas id="radar" width="160" height="160"></canvas>
+<div id="audio-hint">♪ M to mute</div>
 <div id="killfeed"></div>
 
 <div id="ui-container">
@@ -216,8 +222,125 @@ const sunSprite = (() => {
     return sprite;
 })();
 
+// ─── Audio: fully procedural music + SFX via Web Audio (no external files) ─────
+let audioCtx = null, masterGain = null, musicGain = null, sfxGain = null, ambientGain = null;
+let audioReady = false, audioMuted = false, noiseBuffer = null;
+let nextNoteTime = 0, musicStep = 0, musicScheduler = null;
+
+function initAudio() {
+    if (audioReady) { if (audioCtx.state === 'suspended') audioCtx.resume(); return; }
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    audioCtx = new AC();
+    masterGain = audioCtx.createGain(); masterGain.gain.value = audioMuted ? 0 : 0.55; masterGain.connect(audioCtx.destination);
+    musicGain = audioCtx.createGain(); musicGain.gain.value = 0.30; musicGain.connect(masterGain);
+    sfxGain = audioCtx.createGain(); sfxGain.gain.value = 0.55; sfxGain.connect(masterGain);
+    ambientGain = audioCtx.createGain(); ambientGain.gain.value = 0.0; ambientGain.connect(masterGain);
+    noiseBuffer = audioCtx.createBuffer(1, audioCtx.sampleRate * 2, audioCtx.sampleRate);
+    const nd = noiseBuffer.getChannelData(0);
+    for (let i = 0; i < nd.length; i++) nd[i] = Math.random() * 2 - 1;
+    audioReady = true;
+    startWind();
+    nextNoteTime = audioCtx.currentTime + 0.1;
+    musicScheduler = setInterval(scheduleMusic, 25);
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    const hint = document.getElementById('audio-hint');
+    if (hint) { hint.style.opacity = '1'; setTimeout(() => hint.style.opacity = '0', 4000); }
+}
+function midiFreq(m) { return 440 * Math.pow(2, (m - 69) / 12); }
+
+// ── instruments (route to musicGain) ──
+function mPluck(freq, t, dur, gain, type) {
+    const o = audioCtx.createOscillator(); o.type = type || 'triangle'; o.frequency.value = freq;
+    const g = audioCtx.createGain();
+    g.gain.setValueAtTime(0.0001, t); g.gain.linearRampToValueAtTime(gain, t + 0.008); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    o.connect(g); g.connect(musicGain); o.start(t); o.stop(t + dur + 0.02);
+}
+function mBass(freq, t, dur, gain) {
+    const o = audioCtx.createOscillator(); o.type = 'sawtooth'; o.frequency.value = freq;
+    const f = audioCtx.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = 480;
+    const g = audioCtx.createGain();
+    g.gain.setValueAtTime(0.0001, t); g.gain.linearRampToValueAtTime(gain, t + 0.01); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    o.connect(f); f.connect(g); g.connect(musicGain); o.start(t); o.stop(t + dur + 0.02);
+}
+function mKick(t, gain) {
+    const o = audioCtx.createOscillator(); o.type = 'sine';
+    o.frequency.setValueAtTime(140, t); o.frequency.exponentialRampToValueAtTime(45, t + 0.12);
+    const g = audioCtx.createGain(); g.gain.setValueAtTime(gain, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.16);
+    o.connect(g); g.connect(musicGain); o.start(t); o.stop(t + 0.18);
+}
+function mHat(t, gain) {
+    const s = audioCtx.createBufferSource(); s.buffer = noiseBuffer;
+    const f = audioCtx.createBiquadFilter(); f.type = 'highpass'; f.frequency.value = 7000;
+    const g = audioCtx.createGain(); g.gain.setValueAtTime(gain, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.05);
+    s.connect(f); f.connect(g); g.connect(musicGain); s.start(t); s.stop(t + 0.06);
+}
+function startWind() {
+    const s = audioCtx.createBufferSource(); s.buffer = noiseBuffer; s.loop = true;
+    const f = audioCtx.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = 380;
+    s.connect(f); f.connect(ambientGain); s.start();
+}
+
+// ── looping sequencer, key of A minor; tenser + faster in the active phase ──
+const MUSIC_PROG = [[57,60,64,69], [53,57,60,65], [55,59,62,67], [52,55,59,64]]; // Am F C G
+function scheduleMusic() {
+    if (!audioReady || audioMuted) return;
+    const active = gamePhase === 'active';
+    const stepDur = 60 / (active ? 128 : 96) / 2; // eighth notes
+    while (nextNoteTime < audioCtx.currentTime + 0.12) {
+        const step = musicStep, t = nextNoteTime;
+        const chord = MUSIC_PROG[Math.floor(step / 8) % 4];
+        if (step % 4 === 0) mKick(t, active ? 1.0 : 0.6);
+        if (step % 2 === 1) mHat(t, active ? 0.16 : 0.09);
+        if (step % 4 === 0 || (active && step % 8 === 6)) mBass(midiFreq(chord[0] - 12), t, 0.22, active ? 0.5 : 0.3);
+        if (step % 2 === 0 || active) mPluck(midiFreq(chord[step % chord.length] + (active ? 12 : 0)), t, active ? 0.16 : 0.28, active ? 0.2 : 0.14, active ? 'square' : 'triangle');
+        if (step % 8 === 0) mPluck(midiFreq(chord[2] + 12), t, 1.3, 0.05, 'sawtooth'); // soft pad
+        nextNoteTime += stepDur;
+        musicStep = (musicStep + 1) % 32;
+    }
+}
+
+// ── SFX (route to sfxGain) ──
+function tone(type, f0, f1, dur, gain) {
+    if (!audioReady) return; const t = audioCtx.currentTime;
+    const o = audioCtx.createOscillator(); o.type = type; o.frequency.setValueAtTime(f0, t);
+    if (f1 && f1 !== f0) o.frequency.exponentialRampToValueAtTime(Math.max(1, f1), t + dur);
+    const g = audioCtx.createGain(); g.gain.setValueAtTime(gain, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+    o.connect(g); g.connect(sfxGain); o.start(t); o.stop(t + dur + 0.02);
+}
+function sfxJump() { tone('square', 300, 620, 0.12, 0.16); }
+function sfxLand() { tone('sine', 170, 45, 0.16, 0.35); }
+function sfxMount() { tone('triangle', 330, 440, 0.1, 0.22); setTimeout(() => tone('triangle', 494, 587, 0.12, 0.22), 90); }
+function sfxBeep(hi) { tone('square', hi ? 880 : 520, null, 0.11, 0.22); }
+function sfxYouInfected() { tone('square', 220, 920, 0.2, 0.28); } // you tagged someone (good)
+function sfxInfectedYou() { // you got infected (bad): downward zap + squelch
+    if (!audioReady) return; const t = audioCtx.currentTime;
+    tone('sawtooth', 440, 55, 0.4, 0.4);
+    const s = audioCtx.createBufferSource(); s.buffer = noiseBuffer;
+    const f = audioCtx.createBiquadFilter(); f.type = 'bandpass'; f.frequency.value = 700;
+    const g = audioCtx.createGain(); g.gain.setValueAtTime(0.35, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.3);
+    s.connect(f); f.connect(g); g.connect(sfxGain); s.start(t); s.stop(t + 0.32);
+}
+function sfxVictory(win) {
+    if (!audioReady) return; const t0 = audioCtx.currentTime;
+    const seq = win ? [60, 64, 67, 72] : [60, 58, 55, 48];
+    seq.forEach((m, i) => {
+        const t = t0 + i * 0.15;
+        const o = audioCtx.createOscillator(); o.type = 'square'; o.frequency.value = midiFreq(m);
+        const g = audioCtx.createGain(); g.gain.setValueAtTime(0.0001, t); g.gain.linearRampToValueAtTime(0.28, t + 0.02); g.gain.exponentialRampToValueAtTime(0.001, t + 0.35);
+        o.connect(g); g.connect(sfxGain); o.start(t); o.stop(t + 0.37);
+    });
+}
+function toggleMute() {
+    audioMuted = !audioMuted;
+    if (masterGain) masterGain.gain.value = audioMuted ? 0 : 0.55;
+    const hint = document.getElementById('audio-hint');
+    if (hint) { hint.innerText = audioMuted ? '♪ muted (M)' : '♪ M to mute'; hint.style.opacity = '1'; setTimeout(() => hint.style.opacity = '0', 2000); }
+}
+
 // ─── Game state ───────────────────────────────────────────────────────────────
 let gamePhase = 'dropping';
+let lastCountdownSec = -1;
 let phaseTimer = 0;
 let nightFadeProgress = 0;
 let stormCenter = new THREE.Vector3(0, 0, 0);
@@ -801,6 +924,8 @@ function declareVictory(infectionWon) {
     v.style.display = "block";
     document.getElementById('back-to-lobby').style.display = "block";
     document.getElementById('blocker').style.display = "flex";
+    // Win jingle from the player's own perspective (their side winning = happy)
+    sfxVictory(infectionWon === playerIsInfected);
 }
 
 function checkWinCondition() {
@@ -822,6 +947,7 @@ function infectBot(bot, infectorName) {
     if (bot.isInfected) return;
     bot.isInfected = true; bot.visualMesh.material[0].copy(infectedMaterial);
     survivorsLeft--; document.getElementById('survivors-count').innerText = survivorsLeft;
+    if (infectorName === "YOU") sfxYouInfected();
     logFeed(`${infectorName} infected a Survivor!`, "#33ff33"); checkWinCondition();
 }
 
@@ -835,6 +961,7 @@ function infectPlayer(infectorName) {
     document.getElementById('status-box').style.borderBottomColor = "#33ff33";
     const overlay = document.getElementById('damage-overlay');
     overlay.style.opacity = 1; setTimeout(() => overlay.style.opacity = 0, 800);
+    sfxInfectedYou();
     if (GAME_MODE === 'multi' && socket) socket.emit('i_infected', { byName: infectorName });
     checkWinCondition();
 }
@@ -969,7 +1096,7 @@ backBtn.addEventListener('click', () => {
 // ─── Controls ─────────────────────────────────────────────────────────────────
 const controls = new THREE.PointerLockControls(camera, document.body);
 const blocker = document.getElementById('blocker');
-blocker.addEventListener('click', () => { if (!isVictory) controls.lock(); });
+blocker.addEventListener('click', () => { initAudio(); if (!isVictory) controls.lock(); });
 controls.addEventListener('lock', () => { blocker.style.display = 'none'; });
 controls.addEventListener('unlock', () => {
     if (!isVictory) blocker.style.display = 'flex';
@@ -982,12 +1109,13 @@ document.addEventListener('keydown', (e) => {
     if (e.code === 'KeyS' || e.code === 'ArrowDown') keys.s = true;
     if (e.code === 'KeyD' || e.code === 'ArrowRight') keys.d = true;
     if (e.code === 'Space') keys.space = true;
+    if (e.code === 'KeyM') toggleMute();
     if (e.code === 'KeyE' && controls.isLocked && !isVictory && !playerIsGliding && gamePhase === 'active') {
-        if (playerMountedHorse) { playerMountedHorse.rider = null; playerMountedHorse = null; }
+        if (playerMountedHorse) { playerMountedHorse.rider = null; playerMountedHorse = null; sfxMount(); }
         else {
             let nearest = null; let minDistSq = 1200;
             horses.forEach(h => { if (!h.rider) { let dSq = camera.position.distanceToSquared(h.position); if (dSq < minDistSq) { minDistSq = dSq; nearest = h; } } });
-            if (nearest) { playerMountedHorse = nearest; nearest.rider = 'player'; }
+            if (nearest) { playerMountedHorse = nearest; nearest.rider = 'player'; sfxMount(); }
         }
     }
 });
@@ -1072,7 +1200,7 @@ function updateBots(delta, time) {
                 const dy = p.mesh.position.y - pf;
                 const dz = p.mesh.position.z - camera.position.z;
                 if (dx*dx + dy*dy + dz*dz < 180) {
-                    if (playerIsInfected && !p.isInfected) socket.emit('infect', id);
+                    if (playerIsInfected && !p.isInfected) { socket.emit('infect', id); sfxYouInfected(); }
                     else if (!playerIsInfected && p.isInfected) infectPlayer(p.name || "a Player");
                 }
             });
@@ -1084,6 +1212,7 @@ function updateBots(delta, time) {
     } else if (gamePhase === 'countdown') {
         let secondsLeft = Math.ceil((phaseTimer - time) / 1000);
         document.getElementById('phase-alert').innerText = `INFECTION IN: ${secondsLeft}`;
+        if (secondsLeft !== lastCountdownSec) { lastCountdownSec = secondsLeft; if (secondsLeft <= 5 && secondsLeft > 0) sfxBeep(secondsLeft <= 1); }
         if (time > phaseTimer) triggerFirstInfection();
     }
 
@@ -1363,6 +1492,8 @@ function animate() {
         ambientLight.intensity = THREE.MathUtils.lerp(0.55, 0.22, nightFadeProgress);
         dirLight.intensity = THREE.MathUtils.lerp(0.75, 0.3, nightFadeProgress);
         sunSprite.material.opacity = 1 - nightFadeProgress;
+        // Wind ambience swells as night falls
+        if (ambientGain) ambientGain.gain.value = 0.03 + nightFadeProgress * 0.22;
     }
 
     if (gamePhase === 'active') {
@@ -1405,7 +1536,7 @@ function animate() {
             const dx = vRight.x * (direction.x * 150 * delta) + vForward.x * (direction.z * 150 * delta);
             const dz = vRight.z * (direction.x * 150 * delta) + vForward.z * (direction.z * 150 * delta);
             camera.position.x += dx; camera.position.z += dz;
-            if (camera.position.y <= targetFloorY) { camera.position.y = targetFloorY; playerIsGliding = false; playerLanded = true; playerGlider.visible = false; }
+            if (camera.position.y <= targetFloorY) { camera.position.y = targetFloorY; playerIsGliding = false; playerLanded = true; playerGlider.visible = false; sfxLand(); }
         } else {
             velocity.x -= velocity.x * 10.0 * delta; velocity.z -= velocity.z * 10.0 * delta;
             direction.z = Number(keys.w) - Number(keys.s); direction.x = Number(keys.d) - Number(keys.a);
@@ -1423,7 +1554,7 @@ function animate() {
             if (gamePhase === 'active') isFloating = applyStormPush(camera.position, delta, true);
             if (!isFloating) {
                 if (camera.position.y > targetFloorY + 2) isJumping = true;
-                if (keys.space && !isJumping) { playerVelocityY = 65; isJumping = true; }
+                if (keys.space && !isJumping) { playerVelocityY = 65; isJumping = true; sfxJump(); }
                 playerVelocityY -= 150 * delta; camera.position.y += playerVelocityY * delta;
                 if (camera.position.y <= targetFloorY) { camera.position.y = targetFloorY; isJumping = false; playerVelocityY = 0; }
             } else { isJumping = true; }
