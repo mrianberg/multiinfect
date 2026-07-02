@@ -226,6 +226,8 @@ let stormRadius = 4000;
 // Storm closes in bursts: alternating CLOSING (fast shrink) and STABLE (hold)
 // phases. Fully time-driven from the shared match clock, so every client agrees
 // on the radius and on the phase countdown shown in the UI.
+// Final circle stops at 300 (was 50) — leaves a real arena to fight in
+// instead of crushing everyone into a single point.
 const STORM_PHASES = [
     { type: 'stable', dur: 15, from: 4000, to: 4000 },
     { type: 'close',  dur: 22, from: 4000, to: 2600 },
@@ -234,11 +236,10 @@ const STORM_PHASES = [
     { type: 'stable', dur: 20, from: 1600, to: 1600 },
     { type: 'close',  dur: 18, from: 1600, to: 900 },
     { type: 'stable', dur: 18, from: 900, to: 900 },
-    { type: 'close',  dur: 16, from: 900, to: 400 },
-    { type: 'stable', dur: 15, from: 400, to: 400 },
-    { type: 'close',  dur: 14, from: 400, to: 120 },
-    { type: 'stable', dur: 12, from: 120, to: 120 },
-    { type: 'close',  dur: 12, from: 120, to: 50 },
+    { type: 'close',  dur: 16, from: 900, to: 500 },
+    { type: 'stable', dur: 15, from: 500, to: 500 },
+    { type: 'close',  dur: 14, from: 500, to: 300 },
+    { type: 'stable', dur: 30, from: 300, to: 300 },
 ];
 // Returns { radius, type, remaining } for a given elapsed-seconds value.
 function stormStateAt(elapsed) {
@@ -1145,8 +1146,11 @@ function updateBots(delta, time) {
             }
         }
         if (gamePhase === 'active' && bot.landed) {
+            // Only react once actually at/inside the wall (small buffer) instead
+            // of the old 250-unit "safe" margin, which made bots refuse to go
+            // anywhere near the storm even when it wasn't a real threat yet.
             let distToCenter = Math.sqrt(Math.pow(bot.position.x - stormCenter.x, 2) + Math.pow(bot.position.z - stormCenter.z, 2));
-            if (distToCenter > stormRadius - 250) {
+            if (distToCenter > stormRadius - 40) {
                 let dirToCenter = new THREE.Vector3(stormCenter.x - bot.position.x, 0, stormCenter.z - bot.position.z).normalize();
                 bot.targetPos = bot.position.clone().add(dirToCenter.multiplyScalar(150)); bot.hideout = null;
             }
@@ -1244,7 +1248,7 @@ function animate() {
         // same place and the phase countdown matches on every client.
         const elapsed = matchStartMs ? (time - matchStartMs) / 1000 : 0;
         const st = stormStateAt(elapsed);
-        stormRadius = Math.max(50, st.radius);
+        stormRadius = Math.max(300, st.radius);
         stormMesh.position.copy(stormCenter); stormMesh.position.y = 500;
         stormMesh.scale.set(stormRadius, 1, stormRadius);
 
