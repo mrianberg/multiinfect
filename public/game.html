@@ -948,6 +948,19 @@ function smoothLookAt(bot, targetPos, turnSpeed, delta) {
     bot.quaternion.slerp(smoothTurnDummy.quaternion, delta * turnSpeed);
 }
 
+// Picks a new wander direction for an idle bot. 15% of the time (only once
+// the storm exists) it heads toward the storm's center instead of a fully
+// random heading — a gentle pull inward rather than a hard "stay off the
+// wall" rule, so bots still roam right up to the edge.
+function pickWanderDir(bot) {
+    if (gamePhase === 'active' && Math.random() < 0.15) {
+        const dx = stormCenter.x - bot.position.x, dz = stormCenter.z - bot.position.z;
+        const distSq = dx * dx + dz * dz;
+        if (distSq > 1) { bot.wanderDir.set(dx, 0, dz).normalize(); return; }
+    }
+    bot.wanderDir.set((Math.random()-0.5)*2, 0, (Math.random()-0.5)*2).normalize();
+}
+
 function updateBots(delta, time) {
     let totalLanded = playerLanded ? 1 : 0;
     for (let i = 0; i < bots.length; i++) { if (bots[i].landed) totalLanded++; }
@@ -1094,7 +1107,7 @@ function updateBots(delta, time) {
                         bot.targetPos = visibleTargetPos;
                         bots.forEach(other => { if (other.isInfected && other !== bot && other.position.distanceToSquared(bot.position) < 40000) { if (!other.targetPos || Math.random() < 0.2) other.targetPos = visibleTargetPos.clone(); } });
                     } else {
-                        if (Math.random() < 0.1) bot.wanderDir.set((Math.random()-0.5)*2, 0, (Math.random()-0.5)*2).normalize();
+                        if (Math.random() < 0.1) pickWanderDir(bot);
                         bot.targetPos = bot.position.clone().add(bot.wanderDir.clone().multiplyScalar(50));
                     }
                 } else {
@@ -1123,21 +1136,11 @@ function updateBots(delta, time) {
                             bot.targetPos = bot.hideout;
                             if (bot.position.distanceToSquared(bot.hideout) < 200) bot.targetPos = bot.position;
                         } else {
-                            if (Math.random() < 0.1) bot.wanderDir.set((Math.random()-0.5)*2, 0, (Math.random()-0.5)*2).normalize();
+                            if (Math.random() < 0.1) pickWanderDir(bot);
                             bot.targetPos = bot.position.clone().add(bot.wanderDir.clone().multiplyScalar(50));
                         }
                     }
                 }
-            }
-        }
-        if (gamePhase === 'active' && bot.landed) {
-            // Only react once actually at/inside the wall (small buffer) instead
-            // of the old 250-unit "safe" margin, which made bots refuse to go
-            // anywhere near the storm even when it wasn't a real threat yet.
-            let distToCenter = Math.sqrt(Math.pow(bot.position.x - stormCenter.x, 2) + Math.pow(bot.position.z - stormCenter.z, 2));
-            if (distToCenter > stormRadius - 40) {
-                let dirToCenter = new THREE.Vector3(stormCenter.x - bot.position.x, 0, stormCenter.z - bot.position.z).normalize();
-                bot.targetPos = bot.position.clone().add(dirToCenter.multiplyScalar(150)); bot.hideout = null;
             }
         }
         let speed = (bot.isInfected ? 28 : 34) * delta; if (bot.mount) speed *= 1.5;
