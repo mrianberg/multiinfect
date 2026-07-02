@@ -322,34 +322,66 @@ function subPulse(t, gain) { // rhythmic low tension pulse (active phase)
     const g = audioCtx.createGain(); g.gain.setValueAtTime(0.0001, t); g.gain.linearRampToValueAtTime(gain, t + 0.02); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.22);
     o.connect(f); f.connect(g); g.connect(musicGain); o.start(t); o.stop(t + 0.24);
 }
+function tick(t, gain) { // dry high noise tick — the driving pulse at high intensity
+    const s = audioCtx.createBufferSource(); s.buffer = noiseBuffer;
+    const f = audioCtx.createBiquadFilter(); f.type = 'highpass'; f.frequency.value = 6500;
+    const g = audioCtx.createGain(); g.gain.setValueAtTime(gain, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.04);
+    s.connect(f); f.connect(g); g.connect(musicGain); s.start(t); s.stop(t + 0.05);
+}
+function hiTension(t, gain) { // brief dissonant high shimmer (very high intensity)
+    const f = audioCtx.createBiquadFilter(); f.type = 'bandpass'; f.frequency.value = 2200; f.Q.value = 3;
+    const g = audioCtx.createGain(); g.gain.setValueAtTime(0.0001, t); g.gain.linearRampToValueAtTime(gain, t + 0.02); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.9);
+    [880, 932].forEach(fr => { const o = audioCtx.createOscillator(); o.type = 'sawtooth'; o.frequency.value = fr; o.connect(f); o.start(t); o.stop(t + 1.0); });
+    f.connect(g); g.connect(musicGain); revSend(g, 0.6);
+}
 
 // ── atmospheric, beat-based scheduler. A Phrygian (A Bb C D E F G) for dread;
 // slow heartbeat + sparse dissonant motifs, tightening in the active phase ──
 const PHRYG = [45, 46, 48, 50, 52, 53, 55]; // A2 Bb2 C3 D3 E3 F3 G3
 const TENSION_NOTES = [46, 53, 58, 60, 65]; // Bb, F, Bb(oct), C, F — the uneasy ones
+// intensity (0..1) climbs mainly with the share of the field infected, and a
+// little with match time — so the score winds tighter and faster the more the
+// virus spreads.
+function musicIntensity() {
+    if (gamePhase !== 'active') return 0;
+    const frac = matchTotalEntities > 0 ? Math.max(0, Math.min(1, 1 - survivorsLeft / matchTotalEntities)) : 0;
+    const elapsed = matchStartMs ? (performance.now() - matchStartMs) / 1000 : 0;
+    const tprog = Math.min(1, elapsed / 300);
+    return Math.min(1, 0.2 + 0.8 * Math.min(1, 0.9 * frac + 0.3 * tprog));
+}
 function scheduleMusic() {
     if (!audioReady || audioMuted) return;
     const active = gamePhase === 'active';
-    // drone opens up and rises with the phase
-    if (droneGain) droneGain.gain.setTargetAtTime(active ? 0.26 : 0.16, audioCtx.currentTime, 2);
-    if (droneFilter) droneFilter.Q.value = active ? 7 : 4;
-    const bpm = active ? 96 : 66; // slow, ominous — not danceable
+    const I = musicIntensity(); // 0 pre-infection, 0.2 → 1.0 as it spreads
+    // drone opens up, brightens and thickens with intensity
+    if (droneGain) droneGain.gain.setTargetAtTime(active ? 0.16 + 0.16 * I : 0.16, audioCtx.currentTime, 1.5);
+    if (droneFilter) droneFilter.Q.value = 3 + 7 * I;
+    // tempo ramps from a slow dread pulse up to a frantic one
+    const bpm = active ? (84 + 62 * I) : 66;
     const beatDur = 60 / bpm;
     while (nextNoteTime < audioCtx.currentTime + 0.35) {
         const beat = musicBeat, t = nextNoteTime;
-        // heartbeat "lub-dub" every beat; louder/tighter when active
-        heartbeat(t, active ? 0.5 : 0.32);
-        heartbeat(t + beatDur * 0.26, active ? 0.34 : 0.2);
-        // sparse dissonant bell motif
-        if (Math.random() < (active ? 0.42 : 0.24)) {
-            const pool = Math.random() < 0.6 ? TENSION_NOTES : PHRYG;
+        // heartbeat: louder and the "dub" tightens toward the "lub" as it intensifies
+        heartbeat(t, 0.3 + 0.28 * I);
+        heartbeat(t + beatDur * (0.3 - 0.08 * I), 0.18 + 0.22 * I);
+        // dissonant bell motifs — denser with intensity
+        if (Math.random() < (active ? 0.2 + 0.4 * I : 0.22)) {
+            const pool = Math.random() < 0.5 + 0.3 * I ? TENSION_NOTES : PHRYG;
             const m = pool[Math.floor(Math.random() * pool.length)] + (Math.random() < 0.3 ? 12 : 0);
-            bell(midiFreq(m), t + Math.random() * beatDur * 0.5, active ? 0.16 : 0.12);
+            bell(midiFreq(m), t + Math.random() * beatDur * 0.5, 0.12 + 0.06 * I);
         }
-        // dissonant pad swell every 8 beats (root + minor-2nd + fifth)
-        if (beat % 8 === 0) padSwell([33, 34, 40], t, active ? 0.14 : 0.09, beatDur * 8);
-        // active phase: pulsing low tension on the off-beats
-        if (active && beat % 2 === 1) subPulse(t, 0.3);
+        // dissonant pad swell every 8 beats, thicker with intensity
+        if (beat % 8 === 0) padSwell([33, 34, 40], t, 0.09 + 0.1 * I, beatDur * 8);
+        // low tension pulse: off-beats when active, then every beat once it's heavy
+        if (active && (beat % 2 === 1 || I > 0.55)) subPulse(t, 0.2 + 0.22 * I);
+        // driving 16th-note ticks fade in past the halfway mark of intensity
+        if (active && I > 0.45) {
+            const tg = 0.05 + 0.12 * I;
+            tick(t, tg); tick(t + beatDur * 0.5, tg * 0.8);
+            if (I > 0.75) { tick(t + beatDur * 0.25, tg * 0.6); tick(t + beatDur * 0.75, tg * 0.6); }
+        }
+        // high dissonant shimmer near the climax
+        if (active && I > 0.8 && beat % 4 === 0) hiTension(t, 0.05);
         nextNoteTime += beatDur;
         musicBeat = (musicBeat + 1) % 64;
     }
@@ -468,6 +500,7 @@ function toggleMute() {
 
 // ─── Game state ───────────────────────────────────────────────────────────────
 let gamePhase = 'dropping';
+let matchTotalEntities = 0; // total field size at match start — drives music intensity
 let lastCountdownSec = -1;
 let phaseTimer = 0;
 let nightFadeProgress = 0;
@@ -928,6 +961,7 @@ function processLoadingTasks() {
         playerGlider.visible = true;
 
         survivorsLeft = bots.length + 1 + (GAME_MODE === 'multi' ? Object.keys(mpPlayers).length : 0);
+        matchTotalEntities = survivorsLeft;
         document.getElementById('survivors-count').innerText = survivorsLeft;
 
         // Catch up to a match already in progress (rejoin / mid-match load)
@@ -1776,7 +1810,7 @@ if (GAME_MODE === 'multi' && socket) {
         if (!mpPlayers[id]) mpPlayers[id] = { mesh: null, isInfected: !!isInfected, isGliding: true, landed: false, name, targetPos: null, snapped: false };
         if (sharedBotGeometry) getOrCreateMpMesh(id);
         rebuildSortedIds(); // roster changed → bot ownership map changes
-        survivorsLeft++;
+        survivorsLeft++; matchTotalEntities++;
         document.getElementById('survivors-count').innerText = survivorsLeft;
         logFeed(`${name || 'A player'} joined!`, '#aaaaff');
     });
