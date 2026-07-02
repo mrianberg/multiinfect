@@ -1281,12 +1281,13 @@ function updateBots(delta, time) {
         let hitX = false, hitZ = false;
         bot.position.x += dir.x * speed; if (checkCollision(bot.position, 3)) { bot.position.x -= dir.x * speed; hitX = true; }
         bot.position.z += dir.z * speed; if (checkCollision(bot.position, 3)) { bot.position.z -= dir.z * speed; hitZ = true; }
-        // Suppressed while climbing a tower: the stairwell's shallow steps
-        // are meant to be walked up via the STEP_HEIGHT auto-step below, not
-        // jumped — this reactive jump-on-bump was firing almost every time a
-        // climbing bot grazed a step or flank edge (its target is always
-        // >5 units above while climbing), which is exactly what looked like
-        // "stop at the bottom step and jump."
+        // The big reactive bump-jumps (velocityY=60) are still suppressed
+        // while climbing — a full jump overshoots a 3-unit step and turns
+        // the climb into chaotic leaping. Instead, a blocked climbing bot
+        // gets a tiny assist hop: 1/5 the normal jump strength, just enough
+        // to nudge it over a step's lip when it grazes an edge, without ever
+        // looking like a "real" jump.
+        if (bot.climbingTower && (hitX || hitZ) && !bot.isJumping) { bot.velocityY = 12; bot.isJumping = true; }
         if (!bot.climbingTower && (hitX || hitZ) && bot.targetPos && bot.targetPos.y > bot.position.y + 5) { if (!bot.isJumping) { bot.velocityY = 60; bot.isJumping = true; } }
         if (!bot.climbingTower && (hitX || hitZ) && !bot.isJumping && Math.random() < 0.3) { bot.wanderDir.set((Math.random()-0.5)*2, 0, (Math.random()-0.5)*2).normalize(); bot.targetPos = bot.position.clone().add(bot.wanderDir.clone().multiplyScalar(40)); bot.velocityY = 60; bot.isJumping = true; }
         if (!bot.climbingTower && !bot.isJumping && Math.random() < 0.005) { bot.velocityY = 40 + Math.random() * 20; bot.isJumping = true; }
