@@ -223,36 +223,21 @@ let nightFadeProgress = 0;
 let stormCenter = new THREE.Vector3(0, 0, 0);
 let stormRadius = 4000;
 
-// Storm closes in bursts: alternating CLOSING (fast shrink) and STABLE (hold)
-// phases. Fully time-driven from the shared match clock, so every client agrees
-// on the radius and on the phase countdown shown in the UI.
-// Final circle stops at 300 (was 50) — leaves a real arena to fight in
-// instead of crushing everyone into a single point.
-const STORM_PHASES = [
-    { type: 'stable', dur: 15, from: 4000, to: 4000 },
-    { type: 'close',  dur: 22, from: 4000, to: 2600 },
-    { type: 'stable', dur: 22, from: 2600, to: 2600 },
-    { type: 'close',  dur: 20, from: 2600, to: 1600 },
-    { type: 'stable', dur: 20, from: 1600, to: 1600 },
-    { type: 'close',  dur: 18, from: 1600, to: 900 },
-    { type: 'stable', dur: 18, from: 900, to: 900 },
-    { type: 'close',  dur: 16, from: 900, to: 500 },
-    { type: 'stable', dur: 15, from: 500, to: 500 },
-    { type: 'close',  dur: 14, from: 500, to: 300 },
-    { type: 'stable', dur: 30, from: 300, to: 300 },
-];
-// Returns { radius, type, remaining } for a given elapsed-seconds value.
+// Storm shrinks continuously for the whole match — fast at first, easing off
+// over time (never plateaus, never stops early). Purely a function of elapsed
+// match time, so every client computes the identical radius.
+const STORM_START_RADIUS = 4000;
+const STORM_END_RADIUS = 300; // leaves a real arena, not a pinprick
+const STORM_DURATION = 300;   // shrink spans the full match clock
+
+// Returns { radius, remaining } for a given elapsed-seconds value. Cubic
+// ease-out: shrink rate is fastest at t=0 and tapers smoothly to ~0 by the
+// time the match clock runs out.
 function stormStateAt(elapsed) {
-    let t = elapsed;
-    for (const ph of STORM_PHASES) {
-        if (t < ph.dur) {
-            const k = ph.dur > 0 ? t / ph.dur : 1;
-            return { radius: ph.from + (ph.to - ph.from) * k, type: ph.type, remaining: ph.dur - t };
-        }
-        t -= ph.dur;
-    }
-    const last = STORM_PHASES[STORM_PHASES.length - 1];
-    return { radius: last.to, type: 'final', remaining: 0 };
+    const k = Math.max(0, Math.min(1, elapsed / STORM_DURATION));
+    const eased = 1 - Math.pow(1 - k, 3);
+    const radius = STORM_START_RADIUS - (STORM_START_RADIUS - STORM_END_RADIUS) * eased;
+    return { radius, remaining: Math.max(0, STORM_DURATION - elapsed) };
 }
 
 const stormGeo = new THREE.CylinderGeometry(1, 1, 2000, 64, 1, true);
@@ -1244,29 +1229,22 @@ function animate() {
     }
 
     if (gamePhase === 'active') {
-        // Radius + phase come from the shared match clock, so the storm is in the
-        // same place and the phase countdown matches on every client.
+        // Radius comes from the shared match clock, so the storm is in the
+        // same place on every client at every moment.
         const elapsed = matchStartMs ? (time - matchStartMs) / 1000 : 0;
         const st = stormStateAt(elapsed);
-        stormRadius = Math.max(300, st.radius);
+        stormRadius = Math.max(STORM_END_RADIUS, st.radius);
         stormMesh.position.copy(stormCenter); stormMesh.position.y = 500;
         stormMesh.scale.set(stormRadius, 1, stormRadius);
 
         if (!isVictory) {
             const alert = document.getElementById('phase-alert');
-            const secs = Math.ceil(st.remaining);
-            const mm = Math.floor(secs / 60), ss = secs % 60;
-            const clock = `${mm}:${ss < 10 ? '0' : ''}${ss}`;
-            if (st.type === 'close') {
-                alert.innerText = `⚠ STORM CLOSING — ${clock}`;
-                alert.style.color = '#ff44ff';
-            } else if (st.type === 'stable') {
-                alert.innerText = `STORM STABLE — CLOSES IN ${clock}`;
-                alert.style.color = '#ffcc00';
-            } else {
+            if (elapsed >= STORM_DURATION) {
                 alert.innerText = `FINAL CIRCLE`;
-                alert.style.color = '#ff44ff';
+            } else {
+                alert.innerText = `⚠ STORM CLOSING — ${Math.round(stormRadius)}m`;
             }
+            alert.style.color = '#ff44ff';
             alert.style.display = 'block';
         }
     }
