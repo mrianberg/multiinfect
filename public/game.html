@@ -459,20 +459,41 @@ function spawnTallTower(cx, cz) {
     const s = 60; const h = 180;
     addB(10, h+30, 10, -25, h/2-15, -25, false); addB(10, h+30, 10, 25, h/2-15, -25, false);
     addB(10, h+30, 10, -25, h/2-15, 25, false); addB(10, h+30, 10, 25, h/2-15, 25, false);
+
+    // Straight, single-flight stairwell instead of the old dogleg (two ramps
+    // meeting at a 90° turn right next to a support post). One wide, straight
+    // shaft on the south edge — generous enough that bots never need to hug a
+    // wall or navigate a corner mid-climb, which is what kept trapping them.
+    const RAMP_W = 30;                 // full half of the footprint — very forgiving width
+    const RAMP_STEPS = 8;
+    const STEP_RISE = 24 / RAMP_STEPS; // 3 units/step, well under STEP_HEIGHT(6)
+    const GAP_DEPTH = 24;              // z 6..30 (south edge) is the stairwell shaft
+    const STEP_DEPTH = GAP_DEPTH / RAMP_STEPS;
+
     for (let floorNum = 1; floorNum <= 5; floorNum++) {
         let yLvl = 24 * floorNum;
-        globalWaypoints.push(new THREE.Vector3(cx - 20, py + yLvl, cz - 20));
-        globalWaypoints.push(new THREE.Vector3(cx + 20, py + yLvl, cz + 20));
+        // Both waypoints target this floor's height (same convention as
+        // before — a waypoint is "the next floor up"), but now sit at the
+        // ramp's entrance and exit x/z instead of a diagonal corner, so a
+        // climbing bot's target pulls it straight into the shaft.
+        globalWaypoints.push(new THREE.Vector3(cx, py + yLvl, cz + 6 + STEP_DEPTH / 2));
+        globalWaypoints.push(new THREE.Vector3(cx, py + yLvl, cz + 6 + GAP_DEPTH - STEP_DEPTH / 2));
+
         if (floorNum === 5) {
             addB(s, 2, s, 0, yLvl, 0, true);
             addB(s+10, 4, s+10, 0, yLvl+8, 0, false);
         } else {
-            addB(s, 2, 16, 0, yLvl, -22, true); addB(s, 2, 16, 0, yLvl, 22, true);
-            addB(16, 2, s-32, -22, yLvl, 0, true); addB(16, 2, s-32, 22, yLvl, 0, true);
-        }
-        if (floorNum < 5) {
-            for (let i = 0; i < 8; i++) { let y = (yLvl-24)+2+(i*(12/8)); addB(16,4,16,-22,y,-22+(i*5.5),true); }
-            for (let i = 0; i < 8; i++) { let y = (yLvl-12)+2+(i*(12/8)); addB(16,4,16,-22+(i*5.5),y,22,true); }
+            // Solid floor everywhere except the stairwell shaft (x -15..15, z 6..30).
+            addB(s, 2, s - GAP_DEPTH, 0, yLvl, -GAP_DEPTH/2, true);              // north of the shaft
+            addB((s - RAMP_W)/2, 2, GAP_DEPTH, -(RAMP_W + (s-RAMP_W)/2)/2, yLvl, s/2 - GAP_DEPTH/2, true); // shaft's west flank
+            addB((s - RAMP_W)/2, 2, GAP_DEPTH, (RAMP_W + (s-RAMP_W)/2)/2, yLvl, s/2 - GAP_DEPTH/2, true);  // shaft's east flank
+            // Straight run of shallow, overlapping steps spanning the full
+            // ramp width — a bot anywhere across the 30-unit shaft can climb.
+            for (let i = 0; i < RAMP_STEPS; i++) {
+                const topY = (yLvl - 24) + STEP_RISE * (i + 1);
+                const zCenter = 6 + STEP_DEPTH * i + STEP_DEPTH / 2;
+                addB(RAMP_W, 4, STEP_DEPTH, 0, topY - 2, zCenter, true);
+            }
         }
     }
     // Register the merged meshes in buildingMeshes (used to build the AI
