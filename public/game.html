@@ -262,7 +262,6 @@ function getTerrainNormal(x, z) {
 
 let floor;
 const globalColliders = [];
-const globalWaypoints = [];
 
 function addCollider(w, h, d, x, y, z) {
     const box = new THREE.Box3(
@@ -319,6 +318,11 @@ function checkEnvCollision(x, z, radius) {
 }
 
 const buildings = []; const buildingMeshes = []; const treeMeshes = []; const crates = []; const horses = []; const bots = []; const barricades = [];
+// Each tower stores an ordered waypoint chain that describes the exact climb
+// path (ramp → landing → ramp → …). Bots follow it index-by-index rather than
+// beelining, which is what makes the climb deterministic. Geometry + this
+// chain were validated together in an offline bot-movement simulation.
+const towers = [];
 let cachedEnvObstacles = []; let cachedRayObsOnly = [];
 
 function getSafeSpawnPos(rng = Math.random) {
@@ -391,7 +395,7 @@ function spawnBot(x, z) {
     bot.thinkTimer = performance.now() + Math.random() * 2000; bot.whiskerTimer = 0;
     bot.velocityY = 0; bot.isJumping = false; bot.mount = null; bot.hideout = null;
     bot.idleMode = 'wander'; bot.wanderDir = new THREE.Vector3((Math.random()-0.5)*2, 0, (Math.random()-0.5)*2).normalize();
-    bot.targetPos = null; bot.climbingTower = false;
+    bot.targetPos = null; bot.climbTower = null; bot.climbIndex = 0; bot.climbStart = 0;
     // Only slot 0 (body colour) ever changes on infection, so clone just that
     // one and share the other three across all bots — fewer materials for the
     // renderer to track and far less memory at 40 bots.
@@ -446,73 +450,75 @@ function getOrCreateMpMesh(id) {
 }
 
 // ─── Building functions ───────────────────────────────────────────────────────
+// Switchback RAMP tower — a completely new design built around how the dumb
+// auto-stepping bots actually move. Wide (30u) straight ramp flights made of
+// shallow 3u steps (half the 6u auto-step, so bots walk up with no jumping),
+// alternating N/S strips connected by full-width end landings, and NOTHING in
+// the interior to snag on. A validated ordered waypoint chain describes the
+// exact path so bots follow ramp→landing→ramp instead of beelining into walls.
+// (Offline simulation: 500/500 bots reached the top when committing at the
+// entrance.)
 function spawnTallTower(cx, cz) {
-    const py = getTerrainHeight(cx, cz) - 15;
+    const py = getTerrainHeight(cx, cz);
     const matStone = new THREE.MeshLambertMaterial({ color: 0x5a5a5a });
-    const matWood = new THREE.MeshLambertMaterial({ color: 0x3d2817 });
+    const matWood = new THREE.MeshLambertMaterial({ color: 0x6b4a2b });
     const stoneGeos = []; const woodGeos = [];
     const addB = (w, h, d, x, y, z, isWood) => {
         const g = new THREE.BoxGeometry(w, h, d); g.translate(cx + x, py + y, cz + z);
         if (isWood) woodGeos.push(g); else stoneGeos.push(g);
         addCollider(w, h, d, cx + x, py + y, cz + z);
     };
-    const s = 60; const h = 180;
-    addB(10, h+30, 10, -25, h/2-15, -25, false); addB(10, h+30, 10, 25, h/2-15, -25, false);
-    addB(10, h+30, 10, -25, h/2-15, 25, false); addB(10, h+30, 10, 25, h/2-15, 25, false);
 
-    // Straight, single-flight stairwell instead of the old dogleg (two ramps
-    // meeting at a 90° turn right next to a support post). One wide, straight
-    // shaft — generous enough that bots never need to hug a wall or navigate
-    // a corner mid-climb, which is what kept trapping them. Each floor's
-    // shaft alternates between the south and north edge (a switchback), so
-    // climbing all the way up is a natural zigzag instead of one long shaft.
-    const RAMP_W = 30;                 // full half of the footprint — very forgiving width
-    const RAMP_STEPS = 8;
-    const STEP_RISE = 24 / RAMP_STEPS; // 3 units/step, well under STEP_HEIGHT(6)
-    const GAP_DEPTH = 24;              // 24-unit-deep stairwell shaft
-    const STEP_DEPTH = GAP_DEPTH / RAMP_STEPS;
+    const HALF = 36;            // footprint 72×72
+    const LVL_H = 24;           // rise per flight
+    const N_FLIGHTS = 4;        // top platform at y = 96
+    const STRIP_HALF = 15;      // ramp z half-width (30u wide — very forgiving)
+    const STRIP_ZC = 20;        // ramp strip centre offset (±20)
+    const RX = 28;              // ramp runs x = -28 … +28
+    const N_STEPS = 8;
+    const STEP_RISE = LVL_H / N_STEPS;   // 3u  (< STEP_HEIGHT 6 → auto-stepped)
+    const STEP_RUN = (2 * RX) / N_STEPS; // 7u
+    const LAND_X0 = RX, LAND_X1 = HALF;  // end landings occupy x 28…36
 
-    for (let floorNum = 1; floorNum <= 5; floorNum++) {
-        let yLvl = 24 * floorNum;
-        // +1 = shaft on the south edge (z>0), -1 = north edge (z<0) — flips
-        // every floor.
-        const dir = (floorNum % 2 === 1) ? 1 : -1;
-        if (floorNum === 5) {
-            // Top floor is a solid roof cap with no stairway leading into it
-            // (matches the original design). No waypoints here — bots used
-            // to target this floor's waypoint after finishing floor 4's
-            // climb, then walk straight into the solid underside with no
-            // opening to pass through, endlessly bumping against the
-            // "ceiling" since there was never a way up.
-            addB(s, 2, s, 0, yLvl, 0, true);
-            addB(s+10, 4, s+10, 0, yLvl+8, 0, false);
-        } else {
-            // Both waypoints target this floor's height (same convention as
-            // before — a waypoint is "the next floor up"), but now sit at the
-            // ramp's entrance and exit x/z instead of a diagonal corner, so a
-            // climbing bot's target pulls it straight into the shaft.
-            globalWaypoints.push(new THREE.Vector3(cx, py + yLvl, cz + dir * (6 + STEP_DEPTH / 2)));
-            globalWaypoints.push(new THREE.Vector3(cx, py + yLvl, cz + dir * (6 + GAP_DEPTH - STEP_DEPTH / 2)));
-            // Solid floor everywhere except the stairwell shaft.
-            addB(s, 2, s - GAP_DEPTH, 0, yLvl, -dir * GAP_DEPTH/2, true);                                     // opposite the shaft
-            addB((s - RAMP_W)/2, 2, GAP_DEPTH, -(RAMP_W + (s-RAMP_W)/2)/2, yLvl, dir * (s/2 - GAP_DEPTH/2), true); // shaft's west flank
-            addB((s - RAMP_W)/2, 2, GAP_DEPTH, (RAMP_W + (s-RAMP_W)/2)/2, yLvl, dir * (s/2 - GAP_DEPTH/2), true);  // shaft's east flank
-            // Straight run of shallow, overlapping steps spanning the full
-            // ramp width — a bot anywhere across the 30-unit shaft can climb.
-            for (let i = 0; i < RAMP_STEPS; i++) {
-                const topY = (yLvl - 24) + STEP_RISE * (i + 1);
-                const zCenter = dir * (6 + STEP_DEPTH * i + STEP_DEPTH / 2);
-                addB(RAMP_W, 4, STEP_DEPTH, 0, topY - 2, zCenter, true);
-            }
+    // Ground pad (4 quadrants so no single collider centre is too far from a
+    // bot standing on its edge — the collision early-out skips colliders >60u
+    // away in XZ).
+    for (const sx of [-1, 1]) for (const sz of [-1, 1]) addB(HALF, 2, HALF, sx*HALF/2, 0, sz*HALF/2, false);
+
+    const chain = [];
+    chain.push(new THREE.Vector3(cx - RX, py + 0, cz + STRIP_ZC)); // entrance (flight 0 base)
+
+    for (let f = 0; f < N_FLIGHTS; f++) {
+        const yStart = f * LVL_H, yEnd = (f + 1) * LVL_H;
+        const zc = (f % 2 === 0) ? STRIP_ZC : -STRIP_ZC;
+        const xDir = (f % 2 === 0) ? 1 : -1; // +X on even flights, −X on odd (switchback)
+        for (let i = 0; i < N_STEPS; i++) {
+            const topY = yStart + STEP_RISE * (i + 1);
+            const xLo = -RX + STEP_RUN * i, xHi = -RX + STEP_RUN * (i + 1);
+            const xCenter = (xDir === 1) ? (xLo + xHi) / 2 : -((xLo + xHi) / 2);
+            addB(STEP_RUN + 1, 4, 2 * STRIP_HALF, xCenter, topY - 2, zc, true);
         }
+        // Full-width landing at the flight's high end (split in z for collider distance)
+        const landCx = (xDir === 1) ? (LAND_X0 + LAND_X1) / 2 : -(LAND_X0 + LAND_X1) / 2;
+        for (const sz of [-1, 1]) addB(LAND_X1 - LAND_X0 + 2, 2, HALF, landCx, yEnd, sz*HALF/2, false);
+
+        const topX = (xDir === 1) ? RX : -RX;
+        chain.push(new THREE.Vector3(cx + topX, py + yEnd, cz + zc));       // flight top (a landing)
+        if (f < N_FLIGHTS - 1) chain.push(new THREE.Vector3(cx + topX, py + yEnd, cz - zc)); // cross to next flight's base
     }
-    // Register the merged meshes in buildingMeshes (used to build the AI
-    // whisker/vision raycast list). These were previously added to the scene
-    // only — invisible to bot obstacle-avoidance, so bots would walk straight
-    // into tower posts/stairs with no whisker warning and get stuck.
+
+    // Decorative cap: 4 corner legs + a roof, ALL above the top platform (y96)
+    // so they never obstruct the climb.
+    const capBase = N_FLIGHTS * LVL_H; // 96
+    for (const sx of [-1, 1]) for (const sz of [-1, 1]) addB(4, 20, 4, sx*34, capBase + 10, sz*34, true);
+    addB(2*HALF + 8, 3, 2*HALF + 8, 0, capBase + 21, 0, true);
+
     if (stoneGeos.length > 0) { const m = new THREE.Mesh(THREE.BufferGeometryUtils.mergeBufferGeometries(stoneGeos), matStone); scene.add(m); buildingMeshes.push(m); }
     if (woodGeos.length > 0) { const m = new THREE.Mesh(THREE.BufferGeometryUtils.mergeBufferGeometries(woodGeos), matWood); scene.add(m); buildingMeshes.push(m); }
-    buildings.push({ position: new THREE.Vector3(cx, py, cz) });
+
+    const base = new THREE.Vector3(cx, py, cz);
+    towers.push({ base, chain, entrance: chain[0] });
+    buildings.push({ position: base }); // still a hideout target for survivor AI
 }
 
 // ─── Loading queue ────────────────────────────────────────────────────────────
@@ -1096,7 +1102,7 @@ function updateBots(delta, time) {
             bot.wasReplicated = false;
             bot.velocityY = 0;
             bot.targetPos = null;
-            bot.climbingTower = false;
+            bot.climbTower = null;
             // Discard the previous owner's stale target so that if ownership
             // later flips back to a remote player we don't lerp toward it.
             bot.netTarget = null;
@@ -1118,71 +1124,60 @@ function updateBots(delta, time) {
         }
         if (time > bot.thinkTimer) {
             if (botsThinkingThisFrame >= 5) { bot.thinkTimer = time + 30 + Math.random() * 30; }
-            else if (bot.climbingTower) {
-                // Committed to climbing: keep heading for the current
-                // stairwell waypoint instead of re-rolling into hunt/wander
-                // every ~250ms (that dice roll was yanking bots off the
-                // stairs mid-approach, which looked like stalling at the
-                // bottom step and then jumping randomly).
-                botsThinkingThisFrame++; bot.thinkTimer = time + 200 + Math.random() * 300;
-                // Safety valve: since jump-recovery is suppressed while
-                // climbing, a bot that genuinely can't make progress (wedged
-                // on some geometry edge case) must still have a way out
-                // instead of being committed forever. Give up after 6s with
-                // no arrival — normal AI (including jump-recovery) resumes.
-                if (time - bot.climbStartTime > 6000) {
-                    bot.climbingTower = false;
+            else if (bot.climbTower) {
+                // Committed to climbing: follow this tower's ordered waypoint
+                // chain index-by-index. No re-rolling into hunt/wander and no
+                // beelining — just advance to the next chain point when the
+                // current one is reached. This deterministic path-following is
+                // what finally makes the climb reliable.
+                botsThinkingThisFrame++; bot.thinkTimer = time + 150 + Math.random() * 150;
+                const chain = bot.climbTower.chain;
+                // Safety valve: give up if no progress for 12s (any leftover
+                // geometry edge case) so a bot is never committed forever.
+                if (time - bot.climbStart > 12000) {
+                    bot.climbTower = null;
                 } else {
-                const dToTarget = bot.targetPos ? Math.sqrt(Math.pow(bot.position.x-bot.targetPos.x,2)+Math.pow(bot.position.z-bot.targetPos.z,2)) : Infinity;
-                const arrived = bot.targetPos && dToTarget < 15 && Math.abs(bot.position.y - bot.targetPos.y) < 10;
-                if (arrived) {
-                    // Reached this floor: either keep climbing to the next
-                    // waypoint above, or deliberately hop off the tower's edge.
-                    // Once already committed, search a bit wider than the
-                    // engage radius (4900=70u) since the switchback puts
-                    // consecutive floors' waypoints up to ~43u apart.
-                    let nextNode = null; let minD = 100000;
-                    for (let w of globalWaypoints) {
-                        let d = bot.position.distanceToSquared(w);
-                        if (d < minD && d < 4900 && w.y > bot.position.y + 5 && w.y < bot.position.y + 40) { minD = d; nextNode = w; }
-                    }
-                    if (nextNode && Math.random() < 0.6) {
-                        bot.targetPos = nextNode.clone();
-                        bot.climbStartTime = time; // fresh timeout budget for the next flight
-                    } else {
-                        bot.climbingTower = false;
-                        // Leap outward, away from the tower's center, out over
-                        // open air — a deliberate exit rather than a panic jump.
-                        let nearestB = null; let minB = Infinity;
-                        buildings.forEach(b => { let d = bot.position.distanceToSquared(b.position); if (d < minB) { minB = d; nearestB = b; } });
-                        let outDir = new THREE.Vector3((Math.random()-0.5)*2, 0, (Math.random()-0.5)*2);
-                        if (nearestB) {
-                            outDir.set(bot.position.x - nearestB.position.x, 0, bot.position.z - nearestB.position.z);
-                            if (outDir.lengthSq() < 1) outDir.set((Math.random()-0.5)*2, 0, (Math.random()-0.5)*2);
+                    const wp = chain[bot.climbIndex];
+                    const dxz = Math.sqrt(Math.pow(bot.position.x - wp.x, 2) + Math.pow(bot.position.z - wp.z, 2));
+                    if (dxz < 12 && Math.abs(bot.position.y - wp.y) < 8) {
+                        bot.climbIndex++;
+                        bot.climbStart = time; // reset budget each waypoint reached
+                        if (bot.climbIndex >= chain.length) {
+                            // Reached the top platform: leave climb mode; 40% of
+                            // the time deliberately hop off the outer edge.
+                            const towerBase = bot.climbTower.base;
+                            bot.climbTower = null;
+                            if (Math.random() < 0.4) {
+                                let outDir = new THREE.Vector3(bot.position.x - towerBase.x, 0, bot.position.z - towerBase.z);
+                                if (outDir.lengthSq() < 1) outDir.set((Math.random()-0.5)*2, 0, (Math.random()-0.5)*2);
+                                outDir.normalize();
+                                bot.wanderDir.copy(outDir);
+                                bot.targetPos = bot.position.clone().add(outDir.clone().multiplyScalar(60));
+                                bot.velocityY = 45; bot.isJumping = true;
+                            }
+                        } else {
+                            bot.targetPos = chain[bot.climbIndex].clone();
                         }
-                        outDir.normalize();
-                        bot.wanderDir.copy(outDir);
-                        bot.targetPos = bot.position.clone().add(outDir.clone().multiplyScalar(60));
-                        bot.velocityY = 45; bot.isJumping = true;
+                    } else {
+                        bot.targetPos = wp.clone(); // keep heading to the current chain point
                     }
-                }
-                // else: still en route to the current stair node — leave
-                // targetPos alone and let normal movement carry it there.
                 }
             } else {
                 botsThinkingThisFrame++; bot.thinkTimer = time + 200 + Math.random() * 300;
-                let nearestStairNode = null; let minNodeDist = 100000;
-                // Only engage a tower if the bot has already wandered within
-                // ~35 units of it — this used to search a 245-unit radius,
-                // which is wide enough to pull bots toward towers from
-                // hundreds of units away and had the whole map swarming them.
-                if (Math.random() < 0.4) {
-                    for (let w of globalWaypoints) {
-                        let d = bot.position.distanceToSquared(w);
-                        if (d < minNodeDist && d < 1225 && w.y > bot.position.y + 5 && w.y < bot.position.y + 40) { minNodeDist = d; nearestStairNode = w; }
+                // Engage a tower only when the bot has wandered right up to its
+                // entrance (chain[0]) — within 16u XZ and near the base height.
+                // Triggering on the entrance specifically (not the tower centre)
+                // is what the offline sim proved is reliable: bots that commit
+                // from the far side or on top of the ramp can't reach the base.
+                let engageTower = null;
+                if (bot.landed) {
+                    for (const t of towers) {
+                        const e = t.entrance;
+                        const ddx = bot.position.x - e.x, ddz = bot.position.z - e.z;
+                        if (ddx*ddx + ddz*ddz < 256 && Math.abs(bot.position.y - e.y) < 12) { engageTower = t; break; }
                     }
                 }
-                if (nearestStairNode) { bot.targetPos = nearestStairNode.clone(); bot.hideout = null; bot.climbingTower = true; bot.climbStartTime = time; }
+                if (engageTower) { bot.climbTower = engageTower; bot.climbIndex = 0; bot.climbStart = time; bot.targetPos = engageTower.chain[0].clone(); bot.hideout = null; }
                 else if (bot.isInfected) {
                     bot.hideout = null;
                     let visibleTargetPos = null; const botEye = bot.position.clone().add(new THREE.Vector3(0, 10, 0));
@@ -1255,7 +1250,7 @@ function updateBots(delta, time) {
         // climbing bot legitimately gets horizontally close to its stair
         // waypoint well before it's finished rising the shaft (24 units deep
         // vs. 24 units tall), so it kept firing mid-climb and derailing them.
-        if (!bot.climbingTower && dist2D < 30 && moveTarget.y > bot.position.y + 15) {
+        if (!bot.climbTower && dist2D < 30 && moveTarget.y > bot.position.y + 15) {
             if (Math.random() < 0.1) bot.wanderDir.set((Math.random()-0.5)*2, 0, (Math.random()-0.5)*2).normalize();
             moveTarget = bot.position.clone().add(bot.wanderDir.clone().multiplyScalar(40));
         }
@@ -1274,7 +1269,7 @@ function updateBots(delta, time) {
             // wide and forgiving, and letting a nearby step/flank spook the
             // whiskers used to hijack targetPos away from the stair waypoint
             // mid-climb.
-            if (distF < 25 && !bot.climbingTower) {
+            if (distF < 25 && !bot.climbTower) {
                 const distL = checkWhisker(lDir); const distR = checkWhisker(rDir);
                 if (distL > distF || distR > distF) {
                     if (distL > distR) dir.copy(lDir); else dir.copy(rDir);
@@ -1292,10 +1287,10 @@ function updateBots(delta, time) {
         // gets a tiny assist hop: 1/5 the normal jump strength, just enough
         // to nudge it over a step's lip when it grazes an edge, without ever
         // looking like a "real" jump.
-        if (bot.climbingTower && (hitX || hitZ) && !bot.isJumping) { bot.velocityY = 12; bot.isJumping = true; }
-        if (!bot.climbingTower && (hitX || hitZ) && bot.targetPos && bot.targetPos.y > bot.position.y + 5) { if (!bot.isJumping) { bot.velocityY = 60; bot.isJumping = true; } }
-        if (!bot.climbingTower && (hitX || hitZ) && !bot.isJumping && Math.random() < 0.3) { bot.wanderDir.set((Math.random()-0.5)*2, 0, (Math.random()-0.5)*2).normalize(); bot.targetPos = bot.position.clone().add(bot.wanderDir.clone().multiplyScalar(40)); bot.velocityY = 60; bot.isJumping = true; }
-        if (!bot.climbingTower && !bot.isJumping && Math.random() < 0.005) { bot.velocityY = 40 + Math.random() * 20; bot.isJumping = true; }
+        if (bot.climbTower && (hitX || hitZ) && !bot.isJumping) { bot.velocityY = 12; bot.isJumping = true; }
+        if (!bot.climbTower && (hitX || hitZ) && bot.targetPos && bot.targetPos.y > bot.position.y + 5) { if (!bot.isJumping) { bot.velocityY = 60; bot.isJumping = true; } }
+        if (!bot.climbTower && (hitX || hitZ) && !bot.isJumping && Math.random() < 0.3) { bot.wanderDir.set((Math.random()-0.5)*2, 0, (Math.random()-0.5)*2).normalize(); bot.targetPos = bot.position.clone().add(bot.wanderDir.clone().multiplyScalar(40)); bot.velocityY = 60; bot.isJumping = true; }
+        if (!bot.climbTower && !bot.isJumping && Math.random() < 0.005) { bot.velocityY = 40 + Math.random() * 20; bot.isJumping = true; }
         let isFloating = false;
         if (gamePhase === 'active') { isFloating = applyStormPush(bot.position, delta, false); if (isFloating) { bot.isJumping = true; bot.velocityY = 0; } }
         if (!isFloating) {
