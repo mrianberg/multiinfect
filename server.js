@@ -58,6 +58,8 @@ io.on('connection', (socket) => {
             hostName: socket.playerName,
             players: new Map(),
             state: 'lobby', // 'lobby' | 'ingame' | 'ended'
+            seed: (Math.random() * 4294967296) >>> 0, // shared world-generation seed
+            emptySince: null,
         };
         room.players.set(socket.id, {
             id: socket.id,
@@ -81,7 +83,9 @@ io.on('connection', (socket) => {
     socket.on('join_room', (roomId, callback) => {
         const room = rooms.get(roomId);
         if (!room) return callback({ ok: false, error: 'Room not found' });
-        if (room.state !== 'lobby') return callback({ ok: false, error: 'Game already started' });
+        // Players rejoin 'ingame' rooms when navigating from lobby page to game page
+        if (room.state === 'ended') return callback({ ok: false, error: 'Game has ended' });
+        room.emptySince = null;
 
         room.players.set(socket.id, {
             id: socket.id,
@@ -99,7 +103,7 @@ io.on('connection', (socket) => {
 
         // Tell the joining player about existing players
         const playerList = Array.from(room.players.values());
-        callback({ ok: true, roomId, players: playerList, hostId: room.hostId });
+        callback({ ok: true, roomId, players: playerList, hostId: room.hostId, seed: room.seed });
 
         // Tell everyone else in the room
         socket.to(roomId).emit('player_joined', {
@@ -136,9 +140,12 @@ io.on('connection', (socket) => {
         p.rotY = data.rotY;
         p.isGliding = data.isGliding;
         p.landed = data.landed;
-        socket.to(socket.roomId).emit('pos_update', {
+        p.mounted = data.mounted;
+        // volatile: drop stale packets rather than queueing them (reduces perceived lag)
+        socket.to(socket.roomId).volatile.emit('pos_update', {
             id: socket.id, x: data.x, y: data.y, z: data.z,
             rotY: data.rotY, isGliding: data.isGliding, landed: data.landed,
+            mounted: data.mounted,
         });
     });
 
@@ -178,7 +185,10 @@ io.on('connection', (socket) => {
         io.to(roomId).emit('player_left', { id: socket.id });
 
         if (room.players.size === 0) {
-            rooms.delete(roomId);
+            // Keep empty ingame rooms briefly — players reconnect while navigating
+            // from the lobby page to the game page.
+            if (room.state !== 'ingame') rooms.delete(roomId);
+            else room.emptySince = Date.now();
         } else if (room.hostId === socket.id) {
             // Pass host to next player
             const nextPlayer = room.players.values().next().value;
@@ -191,6 +201,16 @@ io.on('connection', (socket) => {
         broadcastRoomList();
     });
 });
+
+// Sweep abandoned ingame rooms (empty for over 2 minutes)
+setInterval(() => {
+    const now = Date.now();
+    for (const [id, room] of rooms) {
+        if (room.players.size === 0 && room.emptySince && now - room.emptySince > 120000) {
+            rooms.delete(id);
+        }
+    }
+}, 60000);
 
 server.listen(PORT, () => {
     console.log(`Infection Tag server running on port ${PORT}`);

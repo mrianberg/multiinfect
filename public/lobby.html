@@ -193,7 +193,7 @@ function confirmName() {
 
 // --- Main menu ---
 document.getElementById('solo-btn').addEventListener('click', () => {
-  window.location.href = 'game.html?mode=solo';
+  window.location.href = '/login/game.php?g=multiinfectgame&mode=solo';
 });
 
 document.getElementById('mp-btn').addEventListener('click', () => {
@@ -329,7 +329,7 @@ socket.on('new_host', ({ id }) => {
 });
 
 socket.on('game_start', () => {
-  window.location.href = `game.html?mode=multi&room=${myRoomId}&name=${encodeURIComponent(myName)}`;
+  window.location.href = `/login/game.php?g=multiinfectgame&mode=multi&room=${myRoomId}&name=${encodeURIComponent(myName)}`;
 });
 
 // Refresh room list periodically while browsing
