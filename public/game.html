@@ -391,7 +391,7 @@ function spawnBot(x, z) {
     bot.thinkTimer = performance.now() + Math.random() * 2000; bot.whiskerTimer = 0;
     bot.velocityY = 0; bot.isJumping = false; bot.mount = null; bot.hideout = null;
     bot.idleMode = 'wander'; bot.wanderDir = new THREE.Vector3((Math.random()-0.5)*2, 0, (Math.random()-0.5)*2).normalize();
-    bot.targetPos = null;
+    bot.targetPos = null; bot.climbingTower = false;
     // Only slot 0 (body colour) ever changes on infection, so clone just that
     // one and share the other three across all bots — fewer materials for the
     // renderer to track and far less memory at 40 bots.
@@ -1091,6 +1091,7 @@ function updateBots(delta, time) {
             bot.wasReplicated = false;
             bot.velocityY = 0;
             bot.targetPos = null;
+            bot.climbingTower = false;
             // Discard the previous owner's stale target so that if ownership
             // later flips back to a remote player we don't lerp toward it.
             bot.netTarget = null;
@@ -1112,7 +1113,45 @@ function updateBots(delta, time) {
         }
         if (time > bot.thinkTimer) {
             if (botsThinkingThisFrame >= 5) { bot.thinkTimer = time + 30 + Math.random() * 30; }
-            else {
+            else if (bot.climbingTower) {
+                // Committed to climbing: keep heading for the current
+                // stairwell waypoint instead of re-rolling into hunt/wander
+                // every ~250ms (that dice roll was yanking bots off the
+                // stairs mid-approach, which looked like stalling at the
+                // bottom step and then jumping randomly).
+                botsThinkingThisFrame++; bot.thinkTimer = time + 200 + Math.random() * 300;
+                const dToTarget = bot.targetPos ? Math.sqrt(Math.pow(bot.position.x-bot.targetPos.x,2)+Math.pow(bot.position.z-bot.targetPos.z,2)) : Infinity;
+                const arrived = bot.targetPos && dToTarget < 15 && Math.abs(bot.position.y - bot.targetPos.y) < 10;
+                if (arrived) {
+                    // Reached this floor: either keep climbing to the next
+                    // waypoint above, or deliberately hop off the tower's edge.
+                    let nextNode = null; let minD = 100000;
+                    for (let w of globalWaypoints) {
+                        let d = bot.position.distanceToSquared(w);
+                        if (d < minD && d < 60000 && w.y > bot.position.y + 5 && w.y < bot.position.y + 40) { minD = d; nextNode = w; }
+                    }
+                    if (nextNode && Math.random() < 0.6) {
+                        bot.targetPos = nextNode.clone();
+                    } else {
+                        bot.climbingTower = false;
+                        // Leap outward, away from the tower's center, out over
+                        // open air — a deliberate exit rather than a panic jump.
+                        let nearestB = null; let minB = Infinity;
+                        buildings.forEach(b => { let d = bot.position.distanceToSquared(b.position); if (d < minB) { minB = d; nearestB = b; } });
+                        let outDir = new THREE.Vector3((Math.random()-0.5)*2, 0, (Math.random()-0.5)*2);
+                        if (nearestB) {
+                            outDir.set(bot.position.x - nearestB.position.x, 0, bot.position.z - nearestB.position.z);
+                            if (outDir.lengthSq() < 1) outDir.set((Math.random()-0.5)*2, 0, (Math.random()-0.5)*2);
+                        }
+                        outDir.normalize();
+                        bot.wanderDir.copy(outDir);
+                        bot.targetPos = bot.position.clone().add(outDir.clone().multiplyScalar(60));
+                        bot.velocityY = 45; bot.isJumping = true;
+                    }
+                }
+                // else: still en route to the current stair node — leave
+                // targetPos alone and let normal movement carry it there.
+            } else {
                 botsThinkingThisFrame++; bot.thinkTimer = time + 200 + Math.random() * 300;
                 let nearestStairNode = null; let minNodeDist = 100000;
                 if (Math.random() < 0.4) {
@@ -1121,7 +1160,7 @@ function updateBots(delta, time) {
                         if (d < minNodeDist && d < 60000 && w.y > bot.position.y + 5 && w.y < bot.position.y + 40) { minNodeDist = d; nearestStairNode = w; }
                     }
                 }
-                if (nearestStairNode) { bot.targetPos = nearestStairNode.clone(); bot.hideout = null; }
+                if (nearestStairNode) { bot.targetPos = nearestStairNode.clone(); bot.hideout = null; bot.climbingTower = true; }
                 else if (bot.isInfected) {
                     bot.hideout = null;
                     let visibleTargetPos = null; const botEye = bot.position.clone().add(new THREE.Vector3(0, 10, 0));
@@ -1189,7 +1228,12 @@ function updateBots(delta, time) {
         let speed = (bot.isInfected ? 28 : 34) * delta; if (bot.mount) speed *= 1.5;
         let moveTarget = bot.targetPos ? bot.targetPos.clone() : bot.position.clone().add(new THREE.Vector3(1,0,0));
         let dist2D = Math.sqrt(Math.pow(bot.position.x - moveTarget.x, 2) + Math.pow(bot.position.z - moveTarget.z, 2));
-        if (dist2D < 30 && moveTarget.y > bot.position.y + 15) {
+        // This "close horizontally but target is way above, give up and
+        // wander" fallback is meant for stuck/unreachable targets — but a
+        // climbing bot legitimately gets horizontally close to its stair
+        // waypoint well before it's finished rising the shaft (24 units deep
+        // vs. 24 units tall), so it kept firing mid-climb and derailing them.
+        if (!bot.climbingTower && dist2D < 30 && moveTarget.y > bot.position.y + 15) {
             if (Math.random() < 0.1) bot.wanderDir.set((Math.random()-0.5)*2, 0, (Math.random()-0.5)*2).normalize();
             moveTarget = bot.position.clone().add(bot.wanderDir.clone().multiplyScalar(40));
         }
@@ -1204,7 +1248,11 @@ function updateBots(delta, time) {
             // ray against the full-island floor mesh.
             const checkWhisker = (direction) => { raycaster.set(botCenter, direction); raycaster.far = 40; const hits = raycaster.intersectObjects(cachedRayObsOnly); raycaster.far = Infinity; return hits.length > 0 ? hits[0].distance : Infinity; };
             const distF = checkWhisker(fDir);
-            if (distF < 25) {
+            // While climbing, ignore whisker steering entirely — the shaft is
+            // wide and forgiving, and letting a nearby step/flank spook the
+            // whiskers used to hijack targetPos away from the stair waypoint
+            // mid-climb.
+            if (distF < 25 && !bot.climbingTower) {
                 const distL = checkWhisker(lDir); const distR = checkWhisker(rDir);
                 if (distL > distF || distR > distF) {
                     if (distL > distR) dir.copy(lDir); else dir.copy(rDir);
@@ -1216,9 +1264,15 @@ function updateBots(delta, time) {
         let hitX = false, hitZ = false;
         bot.position.x += dir.x * speed; if (checkCollision(bot.position, 3)) { bot.position.x -= dir.x * speed; hitX = true; }
         bot.position.z += dir.z * speed; if (checkCollision(bot.position, 3)) { bot.position.z -= dir.z * speed; hitZ = true; }
-        if ((hitX || hitZ) && bot.targetPos && bot.targetPos.y > bot.position.y + 5) { if (!bot.isJumping) { bot.velocityY = 60; bot.isJumping = true; } }
-        if ((hitX || hitZ) && !bot.isJumping && Math.random() < 0.3) { bot.wanderDir.set((Math.random()-0.5)*2, 0, (Math.random()-0.5)*2).normalize(); bot.targetPos = bot.position.clone().add(bot.wanderDir.clone().multiplyScalar(40)); bot.velocityY = 60; bot.isJumping = true; }
-        if (!bot.isJumping && Math.random() < 0.005) { bot.velocityY = 40 + Math.random() * 20; bot.isJumping = true; }
+        // Suppressed while climbing a tower: the stairwell's shallow steps
+        // are meant to be walked up via the STEP_HEIGHT auto-step below, not
+        // jumped — this reactive jump-on-bump was firing almost every time a
+        // climbing bot grazed a step or flank edge (its target is always
+        // >5 units above while climbing), which is exactly what looked like
+        // "stop at the bottom step and jump."
+        if (!bot.climbingTower && (hitX || hitZ) && bot.targetPos && bot.targetPos.y > bot.position.y + 5) { if (!bot.isJumping) { bot.velocityY = 60; bot.isJumping = true; } }
+        if (!bot.climbingTower && (hitX || hitZ) && !bot.isJumping && Math.random() < 0.3) { bot.wanderDir.set((Math.random()-0.5)*2, 0, (Math.random()-0.5)*2).normalize(); bot.targetPos = bot.position.clone().add(bot.wanderDir.clone().multiplyScalar(40)); bot.velocityY = 60; bot.isJumping = true; }
+        if (!bot.climbingTower && !bot.isJumping && Math.random() < 0.005) { bot.velocityY = 40 + Math.random() * 20; bot.isJumping = true; }
         let isFloating = false;
         if (gamePhase === 'active') { isFloating = applyStormPush(bot.position, delta, false); if (isFloating) { bot.isJumping = true; bot.velocityY = 0; } }
         if (!isFloating) {
