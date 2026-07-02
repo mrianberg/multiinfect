@@ -183,6 +183,37 @@ let nightFadeProgress = 0;
 let stormCenter = new THREE.Vector3(0, 0, 0);
 let stormRadius = 4000;
 
+// Storm closes in bursts: alternating CLOSING (fast shrink) and STABLE (hold)
+// phases. Fully time-driven from the shared match clock, so every client agrees
+// on the radius and on the phase countdown shown in the UI.
+const STORM_PHASES = [
+    { type: 'stable', dur: 15, from: 4000, to: 4000 },
+    { type: 'close',  dur: 22, from: 4000, to: 2600 },
+    { type: 'stable', dur: 22, from: 2600, to: 2600 },
+    { type: 'close',  dur: 20, from: 2600, to: 1600 },
+    { type: 'stable', dur: 20, from: 1600, to: 1600 },
+    { type: 'close',  dur: 18, from: 1600, to: 900 },
+    { type: 'stable', dur: 18, from: 900, to: 900 },
+    { type: 'close',  dur: 16, from: 900, to: 400 },
+    { type: 'stable', dur: 15, from: 400, to: 400 },
+    { type: 'close',  dur: 14, from: 400, to: 120 },
+    { type: 'stable', dur: 12, from: 120, to: 120 },
+    { type: 'close',  dur: 12, from: 120, to: 50 },
+];
+// Returns { radius, type, remaining } for a given elapsed-seconds value.
+function stormStateAt(elapsed) {
+    let t = elapsed;
+    for (const ph of STORM_PHASES) {
+        if (t < ph.dur) {
+            const k = ph.dur > 0 ? t / ph.dur : 1;
+            return { radius: ph.from + (ph.to - ph.from) * k, type: ph.type, remaining: ph.dur - t };
+        }
+        t -= ph.dur;
+    }
+    const last = STORM_PHASES[STORM_PHASES.length - 1];
+    return { radius: last.to, type: 'final', remaining: 0 };
+}
+
 const stormGeo = new THREE.CylinderGeometry(1, 1, 2000, 64, 1, true);
 const stormMat = new THREE.MeshBasicMaterial({ color: 0x8800ff, transparent: true, opacity: 0.25, side: THREE.BackSide, depthWrite: false });
 const stormMesh = new THREE.Mesh(stormGeo, stormMat);
@@ -300,15 +331,31 @@ const baseMaterials = [
     new THREE.MeshLambertMaterial({ color: 0x111111 })
 ];
 
-// Materials for real multiplayer players (blue tint to distinguish from bots)
-const mpSurvivorMat = new THREE.MeshLambertMaterial({ color: 0x3366ff });
-const mpInfectedMat = new THREE.MeshLambertMaterial({ color: 0x33ff33 });
-const mpBaseMaterials = [
-    mpSurvivorMat.clone(),
-    new THREE.MeshLambertMaterial({ color: 0x113366 }),
-    new THREE.MeshLambertMaterial({ color: 0xaaccff }),
-    new THREE.MeshLambertMaterial({ color: 0x001133 })
-];
+// Shared horse geometry/material — used both for wild horses and to show a
+// mount under a remote player who is riding.
+const _hb = new THREE.BoxGeometry(4.5, 6, 12); _hb.translate(0, 9, 0);
+const _hh = new THREE.BoxGeometry(2, 5, 4); _hh.translate(0, 14, 5.5);
+const _hl1 = new THREE.BoxGeometry(1.5, 6, 1.5); _hl1.translate(-1.5, 3, 4);
+const _hl2 = new THREE.BoxGeometry(1.5, 6, 1.5); _hl2.translate(1.5, 3, 4);
+const sharedHorseGeometry = THREE.BufferGeometryUtils.mergeBufferGeometries([_hb, _hh, _hl1, _hl2]);
+const horseMaterial = new THREE.MeshLambertMaterial({ color: 0x333333 });
+
+// Floating name tag drawn to a canvas sprite (always faces the camera, drawn
+// on top so it stays readable through walls).
+function makeNameSprite(name) {
+    const label = String(name || 'Player').slice(0, 16);
+    const canvas = document.createElement('canvas');
+    canvas.width = 256; canvas.height = 64;
+    const ctx = canvas.getContext('2d');
+    ctx.font = 'bold 38px Arial'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.lineWidth = 7; ctx.strokeStyle = 'rgba(0,0,0,0.85)'; ctx.strokeText(label, 128, 32);
+    ctx.fillStyle = '#ffffff'; ctx.fillText(label, 128, 32);
+    const tex = new THREE.CanvasTexture(canvas); tex.minFilter = THREE.LinearFilter;
+    const mat = new THREE.SpriteMaterial({ map: tex, depthTest: false, depthWrite: false, transparent: true });
+    const sprite = new THREE.Sprite(mat);
+    sprite.scale.set(24, 6, 1); sprite.position.set(0, 20, 0); sprite.renderOrder = 999;
+    return sprite;
+}
 
 function spawnBot(x, z) {
     const bot = new THREE.Group();
@@ -331,18 +378,31 @@ function spawnBot(x, z) {
 }
 
 // ─── Multiplayer player mesh management ──────────────────────────────────────
-function createMpPlayerMesh(isInfected) {
+// Real players use the SAME colours as bots (red survivor / green infected) and
+// are told apart by a floating name tag.
+function createMpPlayerMesh(isInfected, name) {
     const group = new THREE.Group();
     // Clone only the body slot (recoloured on infection); share the rest.
-    const mats = [mpBaseMaterials[0].clone(), mpBaseMaterials[1], mpBaseMaterials[2], mpBaseMaterials[3]];
-    if (isInfected) mats[0].copy(mpInfectedMat);
+    const mats = [baseMaterials[0].clone(), baseMaterials[1], baseMaterials[2], baseMaterials[3]];
+    if (isInfected) mats[0].copy(infectedMaterial);
     const visualMesh = new THREE.Mesh(sharedBotGeometry, mats);
     group.add(visualMesh);
     group.visualMesh = visualMesh;
+
     const glider = new THREE.Mesh(gliderGeo, gliderMat);
     glider.position.set(0, 20, 0);
     group.add(glider);
     group.gliderRef = glider;
+
+    const horse = new THREE.Mesh(sharedHorseGeometry, horseMaterial);
+    horse.visible = false;
+    group.add(horse);
+    group.horseRef = horse;
+
+    const nameTag = makeNameSprite(name);
+    group.add(nameTag);
+    group.nameRef = nameTag;
+
     scene.add(group);
     return group;
 }
@@ -352,7 +412,7 @@ function getOrCreateMpMesh(id) {
         mpPlayers[id] = { mesh: null, isInfected: false, isGliding: true, landed: false, targetPos: null, snapped: false };
     }
     if (!mpPlayers[id].mesh && sharedBotGeometry) {
-        mpPlayers[id].mesh = createMpPlayerMesh(mpPlayers[id].isInfected);
+        mpPlayers[id].mesh = createMpPlayerMesh(mpPlayers[id].isInfected, mpPlayers[id].name);
     }
     return mpPlayers[id];
 }
@@ -484,15 +544,10 @@ for (let c = 0; c < 2; c++) {
 }
 
 addTask("Spawning Horses", () => {
-    const horseGeoBody = new THREE.BoxGeometry(4.5, 6, 12); horseGeoBody.translate(0, 9, 0);
-    const horseGeoHead = new THREE.BoxGeometry(2, 5, 4); horseGeoHead.translate(0, 14, 5.5);
-    const horseGeoLegs1 = new THREE.BoxGeometry(1.5, 6, 1.5); horseGeoLegs1.translate(-1.5, 3, 4);
-    const horseGeoLegs2 = new THREE.BoxGeometry(1.5, 6, 1.5); horseGeoLegs2.translate(1.5, 3, 4);
-    const plainHorseMerged = THREE.BufferGeometryUtils.mergeBufferGeometries([horseGeoBody, horseGeoHead, horseGeoLegs1, horseGeoLegs2]);
     for (let i = 0; i < 25; i++) {
         let safePos = getSafeSpawnPos(wrand);
         const horse = new THREE.Group();
-        const mesh = new THREE.Mesh(plainHorseMerged, new THREE.MeshLambertMaterial({color: 0x333333}));
+        const mesh = new THREE.Mesh(sharedHorseGeometry, horseMaterial);
         horse.add(mesh); horse.rider = null; horse.wanderDir = new THREE.Vector3(); horse.wanderTimer = 0;
         horse.position.set(safePos.x, getTerrainHeight(safePos.x, safePos.z), safePos.z);
         scene.add(horse); horses.push(horse);
@@ -704,7 +759,7 @@ function infectMpPlayer(targetId, byName) {
     const p = mpPlayers[targetId];
     if (!p || p.isInfected) return;
     p.isInfected = true;
-    if (p.mesh) p.mesh.visualMesh.material[0].copy(mpInfectedMat);
+    if (p.mesh) p.mesh.visualMesh.material[0].copy(infectedMaterial);
     survivorsLeft--; document.getElementById('survivors-count').innerText = survivorsLeft;
     logFeed(`${byName} infected a Player!`, "#33ff33"); checkWinCondition();
 }
@@ -1134,12 +1189,31 @@ function animate() {
     }
 
     if (gamePhase === 'active') {
-        // Derive radius from the shared match clock so the storm is in the same
-        // place on every client (was a per-frame decrement that drifted).
+        // Radius + phase come from the shared match clock, so the storm is in the
+        // same place and the phase countdown matches on every client.
         const elapsed = matchStartMs ? (time - matchStartMs) / 1000 : 0;
-        stormRadius = Math.max(50, 4000 - 12 * elapsed);
+        const st = stormStateAt(elapsed);
+        stormRadius = Math.max(50, st.radius);
         stormMesh.position.copy(stormCenter); stormMesh.position.y = 500;
         stormMesh.scale.set(stormRadius, 1, stormRadius);
+
+        if (!isVictory) {
+            const alert = document.getElementById('phase-alert');
+            const secs = Math.ceil(st.remaining);
+            const mm = Math.floor(secs / 60), ss = secs % 60;
+            const clock = `${mm}:${ss < 10 ? '0' : ''}${ss}`;
+            if (st.type === 'close') {
+                alert.innerText = `⚠ STORM CLOSING — ${clock}`;
+                alert.style.color = '#ff44ff';
+            } else if (st.type === 'stable') {
+                alert.innerText = `STORM STABLE — CLOSES IN ${clock}`;
+                alert.style.color = '#ffcc00';
+            } else {
+                alert.innerText = `FINAL CIRCLE`;
+                alert.style.color = '#ff44ff';
+            }
+            alert.style.display = 'block';
+        }
     }
 
     playerHitbox.position.copy(camera.position); playerHitbox.position.y -= 6;
@@ -1240,6 +1314,11 @@ if (GAME_MODE === 'multi' && socket) {
                 entry.snapped = true;
             }
             entry.mesh.gliderRef.visible = isGliding;
+            // Show a mount under riders and lift their body onto it (matches how
+            // bots sit when mounted); keep the name tag above their head.
+            entry.mesh.horseRef.visible = !!mounted && !isGliding;
+            entry.mesh.visualMesh.position.y = mounted ? 10 : 0;
+            entry.mesh.nameRef.position.y = mounted ? 30 : 20;
         }
     });
 
