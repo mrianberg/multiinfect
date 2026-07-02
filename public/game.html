@@ -1120,18 +1120,30 @@ function updateBots(delta, time) {
                 // stairs mid-approach, which looked like stalling at the
                 // bottom step and then jumping randomly).
                 botsThinkingThisFrame++; bot.thinkTimer = time + 200 + Math.random() * 300;
+                // Safety valve: since jump-recovery is suppressed while
+                // climbing, a bot that genuinely can't make progress (wedged
+                // on some geometry edge case) must still have a way out
+                // instead of being committed forever. Give up after 6s with
+                // no arrival — normal AI (including jump-recovery) resumes.
+                if (time - bot.climbStartTime > 6000) {
+                    bot.climbingTower = false;
+                } else {
                 const dToTarget = bot.targetPos ? Math.sqrt(Math.pow(bot.position.x-bot.targetPos.x,2)+Math.pow(bot.position.z-bot.targetPos.z,2)) : Infinity;
                 const arrived = bot.targetPos && dToTarget < 15 && Math.abs(bot.position.y - bot.targetPos.y) < 10;
                 if (arrived) {
                     // Reached this floor: either keep climbing to the next
                     // waypoint above, or deliberately hop off the tower's edge.
+                    // Once already committed, search a bit wider than the
+                    // engage radius (4900=70u) since the switchback puts
+                    // consecutive floors' waypoints up to ~43u apart.
                     let nextNode = null; let minD = 100000;
                     for (let w of globalWaypoints) {
                         let d = bot.position.distanceToSquared(w);
-                        if (d < minD && d < 60000 && w.y > bot.position.y + 5 && w.y < bot.position.y + 40) { minD = d; nextNode = w; }
+                        if (d < minD && d < 4900 && w.y > bot.position.y + 5 && w.y < bot.position.y + 40) { minD = d; nextNode = w; }
                     }
                     if (nextNode && Math.random() < 0.6) {
                         bot.targetPos = nextNode.clone();
+                        bot.climbStartTime = time; // fresh timeout budget for the next flight
                     } else {
                         bot.climbingTower = false;
                         // Leap outward, away from the tower's center, out over
@@ -1151,16 +1163,21 @@ function updateBots(delta, time) {
                 }
                 // else: still en route to the current stair node — leave
                 // targetPos alone and let normal movement carry it there.
+                }
             } else {
                 botsThinkingThisFrame++; bot.thinkTimer = time + 200 + Math.random() * 300;
                 let nearestStairNode = null; let minNodeDist = 100000;
+                // Only engage a tower if the bot has already wandered within
+                // ~35 units of it — this used to search a 245-unit radius,
+                // which is wide enough to pull bots toward towers from
+                // hundreds of units away and had the whole map swarming them.
                 if (Math.random() < 0.4) {
                     for (let w of globalWaypoints) {
                         let d = bot.position.distanceToSquared(w);
-                        if (d < minNodeDist && d < 60000 && w.y > bot.position.y + 5 && w.y < bot.position.y + 40) { minNodeDist = d; nearestStairNode = w; }
+                        if (d < minNodeDist && d < 1225 && w.y > bot.position.y + 5 && w.y < bot.position.y + 40) { minNodeDist = d; nearestStairNode = w; }
                     }
                 }
-                if (nearestStairNode) { bot.targetPos = nearestStairNode.clone(); bot.hideout = null; bot.climbingTower = true; }
+                if (nearestStairNode) { bot.targetPos = nearestStairNode.clone(); bot.hideout = null; bot.climbingTower = true; bot.climbStartTime = time; }
                 else if (bot.isInfected) {
                     bot.hideout = null;
                     let visibleTargetPos = null; const botEye = bot.position.clone().add(new THREE.Vector3(0, 10, 0));
