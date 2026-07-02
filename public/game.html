@@ -363,14 +363,53 @@ function tone(type, f0, f1, dur, gain) {
     const g = audioCtx.createGain(); g.gain.setValueAtTime(gain, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
     o.connect(g); g.connect(sfxGain); o.start(t); o.stop(t + dur + 0.02);
 }
-function sfxJump() { tone('sine', 240, 460, 0.12, 0.14); }
-function sfxLand() { tone('sine', 170, 45, 0.16, 0.35); }
-function sfxMount() { tone('triangle', 330, 440, 0.1, 0.2); setTimeout(() => tone('triangle', 494, 587, 0.12, 0.2), 90); }
-function sfxBeep(hi) { // ominous low pulse, not a chiptune beep
+// A distortion curve for gnarly, organic growls.
+function makeShaper(amount) {
+    const ws = audioCtx.createWaveShaper(); const n = 256, curve = new Float32Array(n);
+    for (let i = 0; i < n; i++) { const x = i / (n - 1) * 2 - 1; curve[i] = (1 + amount) * x / (1 + amount * Math.abs(x)); }
+    ws.curve = curve; return ws;
+}
+// Ring modulation (carrier × modulator) — inharmonic, metallic, "wrong"-sounding.
+// The staple of corruption/alien SFX. carrier glides f0→f1.
+function ringTone(f0, f1, modFreq, t, dur, gain, rev) {
+    const car = audioCtx.createOscillator(); car.type = 'sine'; car.frequency.setValueAtTime(f0, t); if (f1 !== f0) car.frequency.exponentialRampToValueAtTime(Math.max(1, f1), t + dur);
+    const mod = audioCtx.createOscillator(); mod.type = 'sine'; mod.frequency.value = modFreq;
+    const ring = audioCtx.createGain(); ring.gain.value = 0; // audio-rate mod on the gain = ring mod
+    car.connect(ring); mod.connect(ring.gain);
+    const env = audioCtx.createGain(); env.gain.setValueAtTime(0.0001, t); env.gain.linearRampToValueAtTime(gain, t + 0.02); env.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    ring.connect(env); env.connect(sfxGain); if (rev) revSend(env, rev);
+    car.start(t); mod.start(t); car.stop(t + dur + 0.05); mod.stop(t + dur + 0.05);
+}
+// Filtered-noise burst (breaths, dust, squelch).
+function noiseBurst(t, dur, gain, filtType, f0, f1, Q, rev) {
+    const s = audioCtx.createBufferSource(); s.buffer = noiseBuffer;
+    const f = audioCtx.createBiquadFilter(); f.type = filtType; f.Q.value = Q || 1; f.frequency.setValueAtTime(f0, t); if (f1 !== f0) f.frequency.exponentialRampToValueAtTime(Math.max(1, f1), t + dur);
+    const g = audioCtx.createGain(); g.gain.setValueAtTime(0.0001, t); g.gain.linearRampToValueAtTime(gain, t + 0.01); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    s.connect(f); f.connect(g); g.connect(sfxGain); if (rev) revSend(g, rev);
+    s.start(t); s.stop(t + dur + 0.02);
+}
+function sfxJump() { // soft breathy exhale, not a tonal blip
+    if (!audioReady) return; noiseBurst(audioCtx.currentTime, 0.18, 0.12, 'bandpass', 500, 1400, 1.2, 0.1);
+}
+function sfxLand() { // dull body thud + a puff of dust
     if (!audioReady) return; const t = audioCtx.currentTime;
-    const o = audioCtx.createOscillator(); o.type = 'triangle'; o.frequency.value = hi ? 155 : 110;
-    const g = audioCtx.createGain(); g.gain.setValueAtTime(0.0001, t); g.gain.linearRampToValueAtTime(0.3, t + 0.01); g.gain.exponentialRampToValueAtTime(0.001, t + 0.5);
-    o.connect(g); g.connect(sfxGain); revSend(g, 0.5); o.start(t); o.stop(t + 0.52);
+    tone('sine', 150, 42, 0.16, 0.32);
+    noiseBurst(t, 0.12, 0.1, 'lowpass', 900, 300, 1, 0.1);
+}
+function sfxMount() { // low organic creak
+    if (!audioReady) return; const t = audioCtx.currentTime;
+    const o = audioCtx.createOscillator(); o.type = 'sawtooth'; o.frequency.setValueAtTime(180, t); o.frequency.exponentialRampToValueAtTime(90, t + 0.28);
+    const sh = makeShaper(6); const f = audioCtx.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = 700;
+    const g = audioCtx.createGain(); g.gain.setValueAtTime(0.0001, t); g.gain.linearRampToValueAtTime(0.16, t + 0.03); g.gain.exponentialRampToValueAtTime(0.001, t + 0.3);
+    o.connect(sh); sh.connect(f); f.connect(g); g.connect(sfxGain); revSend(g, 0.3); o.start(t); o.stop(t + 0.32);
+}
+function sfxBeep(hi) { // ominous low pulse with a dissonant tritone shadow
+    if (!audioReady) return; const t = audioCtx.currentTime; const base = hi ? 155 : 110;
+    [base, base * 1.414].forEach((fr, i) => {
+        const o = audioCtx.createOscillator(); o.type = 'triangle'; o.frequency.value = fr;
+        const g = audioCtx.createGain(); g.gain.setValueAtTime(0.0001, t); g.gain.linearRampToValueAtTime(i ? 0.12 : 0.28, t + 0.01); g.gain.exponentialRampToValueAtTime(0.001, t + 0.5);
+        o.connect(g); g.connect(sfxGain); revSend(g, 0.5); o.start(t); o.stop(t + 0.52);
+    });
 }
 function sfxInfectionStart() { // dread riser + low boom as the infection begins
     if (!audioReady) return; const t = audioCtx.currentTime;
@@ -379,18 +418,25 @@ function sfxInfectionStart() { // dread riser + low boom as the infection begins
     f.frequency.setValueAtTime(200, t); f.frequency.exponentialRampToValueAtTime(3500, t + 2.2);
     const g = audioCtx.createGain(); g.gain.setValueAtTime(0.0001, t); g.gain.linearRampToValueAtTime(0.4, t + 2.0); g.gain.exponentialRampToValueAtTime(0.001, t + 2.6);
     s.connect(f); f.connect(g); g.connect(sfxGain); revSend(g, 0.6); s.start(t); s.stop(t + 2.7);
+    ringTone(70, 300, 47, t, 2.2, 0.16, 0.5); // creeping dissonant ring-mod swell under the riser
     const o = audioCtx.createOscillator(); o.type = 'sine'; o.frequency.setValueAtTime(90, t + 2.0); o.frequency.exponentialRampToValueAtTime(30, t + 3.2);
     const bg = audioCtx.createGain(); bg.gain.setValueAtTime(0.0001, t + 2.0); bg.gain.linearRampToValueAtTime(0.6, t + 2.1); bg.gain.exponentialRampToValueAtTime(0.001, t + 3.4);
     o.connect(bg); bg.connect(sfxGain); revSend(bg, 0.5); o.start(t + 2.0); o.stop(t + 3.5);
 }
-function sfxYouInfected() { tone('square', 220, 920, 0.2, 0.28); } // you tagged someone (good)
-function sfxInfectedYou() { // you got infected (bad): downward zap + squelch
+function sfxYouInfected() { // you tagged someone: nasty ring-mod stab + wet squelch
     if (!audioReady) return; const t = audioCtx.currentTime;
-    tone('sawtooth', 440, 55, 0.4, 0.4);
-    const s = audioCtx.createBufferSource(); s.buffer = noiseBuffer;
-    const f = audioCtx.createBiquadFilter(); f.type = 'bandpass'; f.frequency.value = 700;
-    const g = audioCtx.createGain(); g.gain.setValueAtTime(0.35, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.3);
-    s.connect(f); f.connect(g); g.connect(sfxGain); s.start(t); s.stop(t + 0.32);
+    ringTone(180, 420, 240, t, 0.22, 0.24, 0.3);
+    noiseBurst(t, 0.18, 0.22, 'bandpass', 1800, 400, 3, 0.25); // squelch
+}
+function sfxInfectedYou() { // you got infected: visceral corruption — descending
+    // ring-mod shriek, wet squelch, and a distorted low growl, all drenched in reverb
+    if (!audioReady) return; const t = audioCtx.currentTime;
+    ringTone(520, 60, 173, t, 0.55, 0.34, 0.5);        // alien descending shriek (tritone-ish mod)
+    noiseBurst(t + 0.02, 0.4, 0.3, 'bandpass', 1600, 180, 2.5, 0.4); // downward wet squelch
+    const o = audioCtx.createOscillator(); o.type = 'sawtooth'; o.frequency.setValueAtTime(120, t); o.frequency.exponentialRampToValueAtTime(38, t + 0.5);
+    const sh = makeShaper(10); const f = audioCtx.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = 320;
+    const g = audioCtx.createGain(); g.gain.setValueAtTime(0.0001, t); g.gain.linearRampToValueAtTime(0.4, t + 0.03); g.gain.exponentialRampToValueAtTime(0.001, t + 0.6);
+    o.connect(sh); sh.connect(f); f.connect(g); g.connect(sfxGain); revSend(g, 0.4); o.start(t); o.stop(t + 0.62);
 }
 function sfxVictory(win) {
     if (!audioReady) return; const t0 = audioCtx.currentTime;
