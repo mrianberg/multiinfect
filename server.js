@@ -5,17 +5,34 @@ const { randomBytes } = require('crypto');
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: '*' } });
+// Same-origin in production (served behind Apache on ian-berg.com); '*' only if
+// ALLOW_ANY_ORIGIN is set for local testing.
+const io = new Server(server, {
+    cors: { origin: process.env.ALLOW_ANY_ORIGIN ? '*' : 'https://ian-berg.com' },
+    maxHttpBufferSize: 1e6, // 1 MB cap on any single packet
+});
 
 app.use(express.static('public'));
 
 const PORT = process.env.PORT || 3000;
+const MAX_ROOMS = 200;          // global cap
+const MAX_MATCH_ENTITIES = 41;  // players + bots
+
+// A crash in one handler must not take down every game. Log and keep serving.
+process.on('uncaughtException', (err) => {
+    console.error('uncaughtException:', err && err.stack ? err.stack : err);
+});
 
 // rooms: Map<roomId, RoomData>
 const rooms = new Map();
 
 function generateRoomId() {
     return randomBytes(3).toString('hex').toUpperCase();
+}
+
+// Reused for any player-supplied string that gets displayed
+function cleanStr(s, max) {
+    return String(s == null ? '' : s).slice(0, max).replace(/[<>]/g, '');
 }
 
 function getRoomList() {
@@ -37,185 +54,23 @@ function broadcastRoomList() {
     io.emit('room_list', getRoomList());
 }
 
+function makePlayer(socket, isHost) {
+    return {
+        id: socket.id,
+        name: socket.playerName,
+        ready: false,
+        isHost,
+        x: 0, y: 1500, z: 0,
+        rotY: 0,
+        isInfected: false,
+        isGliding: true,
+        landed: false,
+    };
+}
+
 io.on('connection', (socket) => {
     socket.playerName = 'Player';
     socket.roomId = null;
-
-    socket.on('set_name', (name) => {
-        socket.playerName = String(name).slice(0, 20).replace(/[<>]/g, '') || 'Player';
-    });
-
-    socket.on('get_rooms', () => {
-        socket.emit('room_list', getRoomList());
-    });
-
-    socket.on('create_room', (roomName, callback) => {
-        const id = generateRoomId();
-        const room = {
-            id,
-            name: String(roomName).slice(0, 30).replace(/[<>]/g, '') || `${socket.playerName}'s Game`,
-            hostId: socket.id,
-            hostName: socket.playerName,
-            players: new Map(),
-            state: 'lobby', // 'lobby' | 'ingame' | 'ended'
-            seed: (Math.random() * 4294967296) >>> 0, // shared world-generation seed
-            emptySince: null,
-        };
-        room.players.set(socket.id, {
-            id: socket.id,
-            name: socket.playerName,
-            ready: false,
-            isHost: true,
-            // game state filled in later
-            x: 0, y: 1500, z: 0,
-            rotY: 0,
-            isInfected: false,
-            isGliding: true,
-            landed: false,
-        });
-        rooms.set(id, room);
-        socket.join(id);
-        socket.roomId = id;
-        broadcastRoomList();
-        callback({ ok: true, roomId: id });
-    });
-
-    socket.on('join_room', (roomId, callback) => {
-        const room = rooms.get(roomId);
-        if (!room) return callback({ ok: false, error: 'Room not found' });
-        // Players rejoin 'ingame' rooms when navigating from lobby page to game page
-        if (room.state === 'ended') return callback({ ok: false, error: 'Game has ended' });
-        room.emptySince = null;
-
-        // If the previous host never made it into the game (or the room was
-        // briefly empty during the lobby→game transition), this joiner hosts.
-        // The host client is authoritative for bot simulation.
-        if (room.players.size === 0 || !room.players.has(room.hostId)) {
-            room.hostId = socket.id;
-        }
-
-        room.players.set(socket.id, {
-            id: socket.id,
-            name: socket.playerName,
-            ready: false,
-            isHost: false,
-            x: 0, y: 1500, z: 0,
-            rotY: 0,
-            isInfected: false,
-            isGliding: true,
-            landed: false,
-        });
-        socket.join(roomId);
-        socket.roomId = roomId;
-
-        // Tell the joining player about existing players
-        const playerList = Array.from(room.players.values());
-        callback({
-            ok: true, roomId, players: playerList, hostId: room.hostId,
-            seed: room.seed, name: room.name,
-            matchPlayers: room.matchPlayerCount || room.players.size,
-        });
-
-        // Tell everyone else in the room
-        socket.to(roomId).emit('player_joined', {
-            id: socket.id,
-            name: socket.playerName,
-            isHost: false,
-        });
-        broadcastRoomList();
-    });
-
-    socket.on('player_ready', (ready) => {
-        const room = rooms.get(socket.roomId);
-        if (!room) return;
-        const p = room.players.get(socket.id);
-        if (p) p.ready = !!ready;
-        io.to(socket.roomId).emit('ready_update', { id: socket.id, ready: !!ready });
-    });
-
-    socket.on('start_game', () => {
-        const room = rooms.get(socket.roomId);
-        if (!room || room.hostId !== socket.id) return;
-        room.state = 'ingame';
-        // Fresh state for this match: new map seed, clean bot-infection log,
-        // and lock in the player count so every client spawns 41-N bots.
-        room.seed = (Math.random() * 4294967296) >>> 0;
-        room.botsInfected = new Set();
-        room.matchPlayerCount = room.players.size;
-        broadcastRoomList();
-        io.to(socket.roomId).emit('game_start');
-    });
-
-    // Per-frame position update — thin relay, clients handle physics locally
-    socket.on('pos_update', (data) => {
-        const room = rooms.get(socket.roomId);
-        if (!room || room.state !== 'ingame') return;
-        const p = room.players.get(socket.id);
-        if (!p) return;
-        p.x = data.x; p.y = data.y; p.z = data.z;
-        p.rotY = data.rotY;
-        p.isGliding = data.isGliding;
-        p.landed = data.landed;
-        p.mounted = data.mounted;
-        // volatile: drop stale packets rather than queueing them (reduces perceived lag)
-        socket.to(socket.roomId).volatile.emit('pos_update', {
-            id: socket.id, x: data.x, y: data.y, z: data.z,
-            rotY: data.rotY, isGliding: data.isGliding, landed: data.landed,
-            mounted: data.mounted,
-        });
-    });
-
-    // Each player broadcasts the slice of bots they simulate;
-    // everyone else replicates those bots
-    socket.on('bots_state', (data) => {
-        const room = rooms.get(socket.roomId);
-        if (!room || room.state !== 'ingame' || !room.players.has(socket.id)) return;
-        socket.to(socket.roomId).volatile.emit('bots_state', data);
-    });
-
-    // Any client can report tagging a bot; dedupe so the count drops once
-    socket.on('bot_infected', ({ index, byName }) => {
-        const room = rooms.get(socket.roomId);
-        if (!room || room.state !== 'ingame') return;
-        if (typeof index !== 'number') return;
-        if (!room.botsInfected) room.botsInfected = new Set();
-        if (room.botsInfected.has(index)) return;
-        room.botsInfected.add(index);
-        socket.to(socket.roomId).emit('bot_infected', { index, byName });
-    });
-
-    // Authoritative infection events — broadcast to room
-    socket.on('infect', (targetId) => {
-        const room = rooms.get(socket.roomId);
-        if (!room || room.state !== 'ingame') return;
-        const source = room.players.get(socket.id);
-        const target = room.players.get(targetId);
-        if (!source || !target || !source.isInfected || target.isInfected) return;
-        target.isInfected = true;
-        io.to(socket.roomId).emit('infected', { targetId, byId: socket.id, byName: source.name });
-    });
-
-    socket.on('i_infected', (data) => {
-        // Player reports they became infected (by a bot or storm, no target socket)
-        const room = rooms.get(socket.roomId);
-        if (!room) return;
-        const p = room.players.get(socket.id);
-        if (p) p.isInfected = true;
-        socket.to(socket.roomId).emit('infected', { targetId: socket.id, byId: null, byName: data.byName || '?' });
-    });
-
-    socket.on('game_over', (result) => {
-        const room = rooms.get(socket.roomId);
-        if (!room || room.hostId !== socket.id) return;
-        // Return the room to the lobby so the group can play again
-        room.state = 'lobby';
-        for (const p of room.players.values()) {
-            p.ready = false;
-            p.isInfected = false;
-        }
-        io.to(socket.roomId).emit('game_over', result);
-        broadcastRoomList();
-    });
 
     function leaveCurrentRoom() {
         const roomId = socket.roomId;
@@ -233,7 +88,7 @@ io.on('connection', (socket) => {
             // rooms that stay empty.
             room.emptySince = Date.now();
         } else if (room.hostId === socket.id) {
-            // Pass host to next player
+            // Pass host to the next remaining member (never to a random joiner)
             const nextPlayer = room.players.values().next().value;
             if (nextPlayer) {
                 room.hostId = nextPlayer.id;
@@ -244,11 +99,214 @@ io.on('connection', (socket) => {
         broadcastRoomList();
     }
 
+    socket.on('set_name', (name) => {
+        socket.playerName = cleanStr(name, 20) || 'Player';
+    });
+
+    socket.on('get_rooms', () => {
+        socket.emit('room_list', getRoomList());
+    });
+
+    socket.on('create_room', (roomName, callback) => {
+        if (typeof callback !== 'function') return;
+        if (rooms.size >= MAX_ROOMS) return callback({ ok: false, error: 'Server is full, try again later' });
+        leaveCurrentRoom(); // never hold membership in two rooms at once
+
+        const id = generateRoomId();
+        const room = {
+            id,
+            name: cleanStr(roomName, 30) || `${socket.playerName}'s Game`,
+            hostId: socket.id,
+            hostName: socket.playerName,
+            players: new Map(),
+            state: 'lobby', // 'lobby' | 'ingame'
+            seed: (Math.random() * 4294967296) >>> 0, // shared world-generation seed
+            emptySince: null,
+            botsInfected: new Set(),
+            infectedPlayers: new Set(),
+            matchPlayerCount: 1,
+            activeAt: 0, // epoch (ms) when the infection/timer phase started
+        };
+        room.players.set(socket.id, makePlayer(socket, true));
+        rooms.set(id, room);
+        socket.join(id);
+        socket.roomId = id;
+        broadcastRoomList();
+        callback({ ok: true, roomId: id });
+    });
+
+    socket.on('join_room', (roomId, callback) => {
+        if (typeof callback !== 'function') return;
+        const room = rooms.get(roomId);
+        if (!room) return callback({ ok: false, error: 'Room not found' });
+        leaveCurrentRoom(); // drop any prior room membership first
+        room.emptySince = null;
+
+        // If the previous host never made it into the game (or the room was
+        // briefly empty during the lobby→game transition), this joiner hosts.
+        if (room.players.size === 0 || !room.players.has(room.hostId)) {
+            room.hostId = socket.id;
+        }
+
+        const isHost = room.hostId === socket.id;
+        room.players.set(socket.id, makePlayer(socket, isHost));
+        socket.join(roomId);
+        socket.roomId = roomId;
+
+        // Snapshot of live match state so a mid-match (re)joiner is in sync
+        const snapshot = room.state === 'ingame' ? {
+            botsInfected: Array.from(room.botsInfected),
+            infectedPlayers: Array.from(room.infectedPlayers),
+            matchElapsed: room.activeAt ? Math.floor((Date.now() - room.activeAt) / 1000) : 0,
+        } : null;
+
+        callback({
+            ok: true, roomId, players: Array.from(room.players.values()),
+            hostId: room.hostId, seed: room.seed, name: room.name,
+            state: room.state,
+            matchPlayers: room.matchPlayerCount || room.players.size,
+            snapshot,
+        });
+
+        socket.to(roomId).emit('player_joined', {
+            id: socket.id, name: socket.playerName, isHost: false,
+        });
+        broadcastRoomList();
+    });
+
+    socket.on('player_ready', (ready) => {
+        const room = rooms.get(socket.roomId);
+        if (!room) return;
+        const p = room.players.get(socket.id);
+        if (p) p.ready = !!ready;
+        io.to(socket.roomId).emit('ready_update', { id: socket.id, ready: !!ready });
+    });
+
+    socket.on('start_game', () => {
+        const room = rooms.get(socket.roomId);
+        if (!room || room.hostId !== socket.id) return;
+        if (room.state !== 'lobby') return; // ignore double-clicks / stale starts
+        room.state = 'ingame';
+        // Fresh state for this match
+        room.seed = (Math.random() * 4294967296) >>> 0;
+        room.botsInfected = new Set();
+        room.infectedPlayers = new Set();
+        room.matchPlayerCount = room.players.size;
+        room.activeAt = 0;
+        broadcastRoomList();
+        io.to(socket.roomId).emit('game_start');
+    });
+
+    // Host announces the first-infection picks (storm). Host-authoritative so
+    // every client applies an identical set regardless of local RNG state.
+    socket.on('virus_pick', (data) => {
+        const room = rooms.get(socket.roomId);
+        if (!room || room.state !== 'ingame' || room.hostId !== socket.id) return;
+        if (!data || typeof data !== 'object') return;
+        const botCap = MAX_MATCH_ENTITIES;
+        const bots = Array.isArray(data.bots)
+            ? data.bots.filter(i => Number.isInteger(i) && i >= 0 && i < botCap).slice(0, 4)
+            : [];
+        const players = Array.isArray(data.players)
+            ? data.players.filter(id => typeof id === 'string' && room.players.has(id)).slice(0, 4)
+            : [];
+        bots.forEach(i => room.botsInfected.add(i));
+        players.forEach(id => {
+            room.infectedPlayers.add(id);
+            const p = room.players.get(id);
+            if (p) p.isInfected = true;
+        });
+        room.activeAt = Date.now(); // authoritative match-timer start
+        io.to(socket.roomId).emit('virus_pick', { bots, players, activeAt: room.activeAt });
+    });
+
+    // Per-frame position update — thin relay, clients handle physics locally
+    socket.on('pos_update', (data) => {
+        const room = rooms.get(socket.roomId);
+        if (!room || room.state !== 'ingame') return;
+        if (!data || typeof data !== 'object') return;
+        const p = room.players.get(socket.id);
+        if (!p) return;
+        p.x = +data.x || 0; p.y = +data.y || 0; p.z = +data.z || 0;
+        p.rotY = +data.rotY || 0;
+        p.isGliding = !!data.isGliding;
+        p.landed = !!data.landed;
+        p.mounted = !!data.mounted;
+        socket.to(socket.roomId).volatile.emit('pos_update', {
+            id: socket.id, x: p.x, y: p.y, z: p.z,
+            rotY: p.rotY, isGliding: p.isGliding, landed: p.landed, mounted: p.mounted,
+        });
+    });
+
+    // Each player broadcasts the slice of bots they simulate
+    socket.on('bots_state', (data) => {
+        const room = rooms.get(socket.roomId);
+        if (!room || room.state !== 'ingame' || !room.players.has(socket.id)) return;
+        if (!Array.isArray(data) || data.length > MAX_MATCH_ENTITIES) return;
+        socket.to(socket.roomId).volatile.emit('bots_state', data);
+    });
+
+    // Any client can report tagging a bot; dedupe so the count drops once
+    socket.on('bot_infected', (data) => {
+        const room = rooms.get(socket.roomId);
+        if (!room || room.state !== 'ingame') return;
+        const index = data && data.index;
+        if (!Number.isInteger(index) || index < 0 || index >= MAX_MATCH_ENTITIES) return;
+        if (room.botsInfected.has(index)) return;
+        room.botsInfected.add(index);
+        socket.to(socket.roomId).emit('bot_infected', { index, byName: cleanStr(data.byName, 20) });
+    });
+
+    // Player X infected player Y by contact (Y's client is authoritative for
+    // being caught, so we accept X's report only if X is actually infected)
+    socket.on('infect', (targetId) => {
+        const room = rooms.get(socket.roomId);
+        if (!room || room.state !== 'ingame') return;
+        const source = room.players.get(socket.id);
+        const target = room.players.get(targetId);
+        if (!source || !target || !source.isInfected || target.isInfected) return;
+        target.isInfected = true;
+        room.infectedPlayers.add(targetId);
+        io.to(socket.roomId).emit('infected', { targetId, byId: socket.id, byName: source.name });
+    });
+
+    socket.on('i_infected', (data) => {
+        // Player reports they became infected (by a bot or storm, no target socket)
+        const room = rooms.get(socket.roomId);
+        if (!room || room.state !== 'ingame') return;
+        const p = room.players.get(socket.id);
+        if (!p || p.isInfected) return;
+        p.isInfected = true;
+        room.infectedPlayers.add(socket.id);
+        const byName = cleanStr(data && data.byName, 20) || '?';
+        socket.to(socket.roomId).emit('infected', { targetId: socket.id, byId: null, byName });
+    });
+
+    socket.on('game_over', (result) => {
+        const room = rooms.get(socket.roomId);
+        if (!room || room.hostId !== socket.id) return;
+        if (room.state !== 'ingame') return;
+        // Return the room to the lobby so the group can play again
+        room.state = 'lobby';
+        room.activeAt = 0;
+        for (const p of room.players.values()) {
+            p.ready = false;
+            p.isInfected = false;
+        }
+        room.botsInfected = new Set();
+        room.infectedPlayers = new Set();
+        const payload = (result && typeof result === 'object')
+            ? { result: result.result === 'infection' ? 'infection' : 'survivors' }
+            : { result: 'survivors' };
+        io.to(socket.roomId).emit('game_over', payload);
+        broadcastRoomList();
+    });
+
     socket.on('leave_room', leaveCurrentRoom);
     socket.on('disconnect', leaveCurrentRoom);
 });
 
-// Sweep abandoned ingame rooms (empty for over 2 minutes)
+// Sweep rooms that stay empty for over 2 minutes
 setInterval(() => {
     const now = Date.now();
     for (const [id, room] of rooms) {

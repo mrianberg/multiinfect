@@ -109,18 +109,23 @@ const MY_NAME   = urlParams.get('name') || 'Player';
 // ─── Multiplayer setup ────────────────────────────────────────────────────────
 let socket = null;
 let mpPlayers = {}; // id → { mesh, isInfected, isGliding, landed, targetPos, targetRotY, name }
+let iAmHost = false; // authoritative for first infection + win condition
 
 // Bot simulation is split across all real players: bot i is simulated by
 // the player at position (i % playerCount) in the sorted id list, and
 // replicated by everyone else. If a player leaves, their bots redistribute
 // automatically because every client recomputes the same assignment.
-function sortedPlayerIds() {
-    return Object.keys(mpPlayers).concat([socket.id]).sort();
+// The sorted id list is cached and only rebuilt when the roster changes
+// (join/leave) — iOwnBot() runs in per-frame and 40x40 loops, so allocating
+// and sorting there was a real perf drain.
+let _sortedIds = [];
+function rebuildSortedIds() {
+    _sortedIds = Object.keys(mpPlayers).concat(socket ? [socket.id] : []).sort();
 }
 function iOwnBot(i) {
     if (GAME_MODE !== 'multi') return true;
-    const ids = sortedPlayerIds();
-    return ids[i % ids.length] === socket.id;
+    const n = _sortedIds.length;
+    return n > 0 && _sortedIds[i % n] === socket.id;
 }
 
 if (GAME_MODE === 'multi') {
@@ -156,10 +161,12 @@ const nightColor = new THREE.Color(0x1a1a2e);
 scene.background = dayColor.clone();
 scene.fog = new THREE.FogExp2(dayColor.clone(), 0.0008);
 
-const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 8000);
+// far=3500: fog (density 0.0008) fully hides everything past ~2500, so the old
+// 8000 plane just drew invisible geometry. Tighter plane = real frustum culling.
+const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 3500);
 camera.position.set(0, 1500, 0);
 
-const renderer = new THREE.WebGLRenderer({ antialias: false });
+const renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'high-performance' });
 renderer.setSize(window.innerWidth, window.innerHeight);
 document.body.appendChild(renderer.domElement);
 
@@ -310,7 +317,10 @@ function spawnBot(x, z) {
     bot.velocityY = 0; bot.isJumping = false; bot.mount = null; bot.hideout = null;
     bot.idleMode = 'wander'; bot.wanderDir = new THREE.Vector3((Math.random()-0.5)*2, 0, (Math.random()-0.5)*2).normalize();
     bot.targetPos = null;
-    const botMaterials = baseMaterials.map(m => m.clone());
+    // Only slot 0 (body colour) ever changes on infection, so clone just that
+    // one and share the other three across all bots — fewer materials for the
+    // renderer to track and far less memory at 40 bots.
+    const botMaterials = [baseMaterials[0].clone(), baseMaterials[1], baseMaterials[2], baseMaterials[3]];
     const visualMesh = new THREE.Mesh(sharedBotGeometry, botMaterials);
     bot.add(visualMesh); bot.visualMesh = visualMesh;
     const botGlider = new THREE.Mesh(gliderGeo, gliderMat);
@@ -323,7 +333,8 @@ function spawnBot(x, z) {
 // ─── Multiplayer player mesh management ──────────────────────────────────────
 function createMpPlayerMesh(isInfected) {
     const group = new THREE.Group();
-    const mats = mpBaseMaterials.map(m => m.clone());
+    // Clone only the body slot (recoloured on infection); share the rest.
+    const mats = [mpBaseMaterials[0].clone(), mpBaseMaterials[1], mpBaseMaterials[2], mpBaseMaterials[3]];
     if (isInfected) mats[0].copy(mpInfectedMat);
     const visualMesh = new THREE.Mesh(sharedBotGeometry, mats);
     group.add(visualMesh);
@@ -510,15 +521,7 @@ let playerMountedHorse = null;
 let playerIsGliding = true;
 let playerLanded = false;
 
-function countRealSurvivors() {
-    if (GAME_MODE !== 'multi') return 0;
-    return Object.values(mpPlayers).filter(p => !p.isInfected).length;
-}
-
-function updateSurvivorsDisplay() {
-    const total = survivorsLeft + (GAME_MODE === 'multi' ? countRealSurvivors() : 0);
-    document.getElementById('survivors-count').innerText = survivorsLeft;
-}
+let pendingSnapshot = null; // live-match state to apply after world load (rejoin)
 
 function processLoadingTasks() {
     if (loadingQueue.length === 0) {
@@ -536,6 +539,20 @@ function processLoadingTasks() {
 
         survivorsLeft = bots.length + 1 + (GAME_MODE === 'multi' ? Object.keys(mpPlayers).length : 0);
         document.getElementById('survivors-count').innerText = survivorsLeft;
+
+        // Catch up to a match already in progress (rejoin / mid-match load)
+        if (pendingSnapshot) {
+            const snap = pendingSnapshot; pendingSnapshot = null;
+            (snap.botsInfected || []).forEach(i => { if (bots[i]) infectBot(bots[i], 'Infected'); });
+            (snap.infectedPlayers || []).forEach(id => {
+                if (id === socket.id) infectPlayer('the Virus');
+                else if (mpPlayers[id]) infectMpPlayer(id, 'the Virus');
+            });
+            if (snap.matchElapsed > 0) {
+                beginActivePhase();
+                matchStartMs = performance.now() - snap.matchElapsed * 1000;
+            }
+        }
 
         document.getElementById('loading-screen').style.display = 'none';
         document.getElementById('blocker').style.display = 'flex';
@@ -562,64 +579,102 @@ scene.add(playerHitbox); playerHitbox.isPlayer = true;
 
 let killCount = 0;
 function logFeed(msg, color) {
-    killCount++; if (killCount > 6) return;
+    // Guard BEFORE incrementing — the old code incremented then bailed on
+    // overflow without ever decrementing, so during an infection cascade
+    // killCount ratcheted up permanently and the feed went silent forever.
+    if (killCount >= 6) return;
+    killCount++;
     const feed = document.getElementById('killfeed'); const item = document.createElement('div');
     item.innerText = msg; item.style.color = color; feed.appendChild(item);
     setTimeout(() => { item.remove(); killCount--; }, 4000);
 }
 
-function triggerFirstInfection() {
+let matchTimerId = null;
+let matchStartMs = 0; // wall-clock start of the active phase (shared via server)
+
+function beginActivePhase() {
+    if (gamePhase === 'active') return;
     gamePhase = 'active';
     document.getElementById('phase-alert').style.display = 'none';
-    // stormRand is a shared seeded stream — every client computes the same
-    // storm center and picks the same first-infection targets.
+    // Storm center is the FIRST stormRand draw — identical on every client
+    // regardless of roster, so it stays deterministic (not broadcast).
     stormCenter.set((stormRand()-0.5)*2000, 0, (stormRand()-0.5)*2000);
     stormMesh.visible = true;
+    if (!matchStartMs) matchStartMs = performance.now();
 
-    // Deterministic pool: player ids sorted (identical order on all clients),
-    // bots referenced by index (same count on all clients).
-    let pool = [];
-    if (GAME_MODE === 'multi') {
-        Object.keys(mpPlayers).concat([socket.id]).sort().forEach(id => pool.push({ type: 'player', id }));
-    } else {
-        pool.push({ type: 'player', id: 'me' });
+    if (matchTimerId === null) {
+        matchTimerId = setInterval(() => {
+            if (gamePhase !== 'active' || isVictory) return;
+            // Derive from a shared start time rather than counting ticks, so
+            // backgrounded-tab throttling can't desync the clock across clients.
+            timeRemaining = Math.max(0, 300 - Math.floor((performance.now() - matchStartMs) / 1000));
+            let m = Math.floor(timeRemaining / 60); let s = timeRemaining % 60;
+            document.getElementById('timer').innerText = `${m<10?'0':''}${m}:${s<10?'0':''}${s}`;
+            if (timeRemaining <= 0) checkWinCondition();
+        }, 250);
     }
+}
+
+function triggerFirstInfection() {
+    beginActivePhase();
+    // Host (or solo) chooses the first two infections and broadcasts them, so
+    // every client applies an identical set even if the roster changed during
+    // the drop. Non-host clients wait for the 'virus_pick' event.
+    if (GAME_MODE === 'multi' && !iAmHost) return;
+
+    let botPicks = [], playerPicks = [];
+    let pool = [];
+    if (GAME_MODE === 'multi') _sortedIds.forEach(id => pool.push({ type: 'player', id }));
+    else pool.push({ type: 'player', id: 'me' });
     for (let i = 0; i < bots.length; i++) pool.push({ type: 'bot', index: i });
 
     for (let i = 0; i < 2 && pool.length > 0; i++) {
         let r = Math.floor(stormRand() * pool.length);
         let target = pool.splice(r, 1)[0];
-        if (target.type === 'bot') infectBot(bots[target.index], "THE VIRUS");
-        else if (GAME_MODE !== 'multi' || target.id === socket.id) infectPlayer("THE VIRUS");
-        else infectMpPlayer(target.id, "THE VIRUS");
+        if (target.type === 'bot') botPicks.push(target.index);
+        else playerPicks.push(target.id);
     }
 
-    setInterval(() => {
-        if (gamePhase !== 'active' || isVictory) return;
-        timeRemaining--;
-        let m = Math.floor(timeRemaining / 60); let s = timeRemaining % 60;
-        document.getElementById('timer').innerText = `${m<10?'0':''}${m}:${s<10?'0':''}${s}`;
-        if (timeRemaining <= 0) checkWinCondition();
-    }, 1000);
+    if (GAME_MODE === 'multi' && socket) {
+        socket.emit('virus_pick', { bots: botPicks, players: playerPicks });
+    } else {
+        applyVirusPicks(botPicks, playerPicks);
+    }
+}
+
+function applyVirusPicks(botPicks, playerPicks) {
+    beginActivePhase();
+    (botPicks || []).forEach(i => { if (bots[i]) infectBot(bots[i], "THE VIRUS"); });
+    (playerPicks || []).forEach(id => {
+        if (GAME_MODE !== 'multi' || id === socket.id) infectPlayer("THE VIRUS");
+        else infectMpPlayer(id, "THE VIRUS");
+    });
+}
+
+function declareVictory(infectionWon) {
+    if (isVictory) return;
+    isVictory = true;
+    if (matchTimerId !== null) { clearInterval(matchTimerId); matchTimerId = null; }
+    controls.unlock();
+    const v = document.getElementById('victory');
+    v.innerText = infectionWon ? "INFECTION WINS!" : "SURVIVORS WIN!";
+    v.style.color = infectionWon ? "#33ff33" : "#ff3333";
+    v.style.display = "block";
+    document.getElementById('back-to-lobby').style.display = "block";
+    document.getElementById('blocker').style.display = "flex";
 }
 
 function checkWinCondition() {
     if (isVictory || gamePhase !== 'active') return;
+    // Only the authoritative client decides the outcome. Non-host clients
+    // render the winner solely from the server 'game_over' event, so all
+    // players always see the same result.
+    if (GAME_MODE === 'multi' && !iAmHost) return;
     if (survivorsLeft <= 0) {
-        isVictory = true; controls.unlock();
-        document.getElementById('victory').innerText = "INFECTION WINS!";
-        document.getElementById('victory').style.color = "#33ff33";
-        document.getElementById('victory').style.display = "block";
-        document.getElementById('back-to-lobby').style.display = "block";
-        document.getElementById('blocker').style.display = "flex";
+        declareVictory(true);
         if (GAME_MODE === 'multi' && socket) socket.emit('game_over', { result: 'infection' });
     } else if (timeRemaining <= 0) {
-        isVictory = true; controls.unlock();
-        document.getElementById('victory').innerText = "SURVIVORS WIN!";
-        document.getElementById('victory').style.color = "#ff3333";
-        document.getElementById('victory').style.display = "block";
-        document.getElementById('back-to-lobby').style.display = "block";
-        document.getElementById('blocker').style.display = "flex";
+        declareVictory(false);
         if (GAME_MODE === 'multi' && socket) socket.emit('game_over', { result: 'survivors' });
     }
 }
@@ -656,12 +711,15 @@ function infectMpPlayer(targetId, byName) {
 
 // ─── Storm ────────────────────────────────────────────────────────────────────
 function applyStormPush(position, delta, isPlayer) {
-    let distToCenter = Math.sqrt(Math.pow(position.x - stormCenter.x, 2) + Math.pow(position.z - stormCenter.z, 2));
-    if (distToCenter > stormRadius) {
-        let pushDir = new THREE.Vector3(stormCenter.x - position.x, 0, stormCenter.z - position.z).normalize();
-        let pushSpeed = 150 * delta;
-        let origX = position.x; let origZ = position.z;
-        position.x += pushDir.x * pushSpeed; position.z += pushDir.z * pushSpeed;
+    // Inline math (no Vector3 allocation) — this runs for every bot, horse, and
+    // the player each frame once the storm is closing in.
+    const dx = stormCenter.x - position.x, dz = stormCenter.z - position.z;
+    const distToCenter = Math.sqrt(dx * dx + dz * dz);
+    if (distToCenter > stormRadius && distToCenter > 0) {
+        const inv = 1 / distToCenter;
+        const pushSpeed = 150 * delta;
+        const origX = position.x, origZ = position.z;
+        position.x += dx * inv * pushSpeed; position.z += dz * inv * pushSpeed;
         if (checkCollision(position, 3, isPlayer)) {
             position.x = origX; position.z = origZ;
             if (isPlayer) playerVelocityY = 0;
@@ -886,6 +944,9 @@ function updateBots(delta, time) {
             bot.wasReplicated = false;
             bot.velocityY = 0;
             bot.targetPos = null;
+            // Discard the previous owner's stale target so that if ownership
+            // later flips back to a remote player we don't lerp toward it.
+            bot.netTarget = null;
         }
         const currentFeetY = bot.position.y;
         const targetFloorY = getFloorHeight(bot.position.x, bot.position.z, currentFeetY);
@@ -927,9 +988,15 @@ function updateBots(delta, time) {
                     potentialTargets.sort((a, b) => a.distSq - b.distSq);
                     for (let i = 0; i < Math.min(3, potentialTargets.length); i++) {
                         let pt = potentialTargets[i]; let dist = Math.sqrt(pt.distSq);
+                        if (dist > 700) continue; // no need to line-of-sight across the whole island
                         let targetEye = pt.isPlayer ? pt.pos.clone() : pt.pos.clone().add(new THREE.Vector3(0, 10, 0));
                         let dirToTarget = new THREE.Vector3().subVectors(targetEye, botEye).normalize();
-                        raycaster.set(botEye, dirToTarget); const blocks = raycaster.intersectObjects(cachedEnvObstacles);
+                        // Raycast the floor-free obstacle list (cachedRayObsOnly) and cap
+                        // the ray at the target distance — raycasting the 80k-triangle
+                        // floor mesh on infinite rays was the primary source of lag.
+                        raycaster.set(botEye, dirToTarget); raycaster.far = dist;
+                        const blocks = raycaster.intersectObjects(cachedRayObsOnly);
+                        raycaster.far = Infinity;
                         if (blocks.length === 0 || blocks[0].distance > dist - 5) { visibleTargetPos = pt.pos.clone(); break; }
                     }
                     if (visibleTargetPos) {
@@ -958,7 +1025,7 @@ function updateBots(delta, time) {
                     } else {
                         if (!bot.hideout && Math.random() < 0.3) {
                             let nearestB = null; let minB = Infinity;
-                            buildings.forEach(b => { let d = bot.position.distanceToSquared(b.position || b.position); if (d < minB) { minB = d; nearestB = b; } });
+                            buildings.forEach(b => { let d = bot.position.distanceToSquared(b.position); if (d < minB) { minB = d; nearestB = b; } });
                             if (nearestB) bot.hideout = (nearestB.position || nearestB).clone();
                         }
                         if (bot.hideout) {
@@ -992,7 +1059,10 @@ function updateBots(delta, time) {
             bot.whiskerTimer = time + 150 + Math.random() * 100;
             const botCenter = bot.position.clone().add(new THREE.Vector3(0, 8, 0));
             const fDir = dir.clone(); const lDir = fDir.clone().applyAxisAngle(new THREE.Vector3(0,1,0), Math.PI/4); const rDir = fDir.clone().applyAxisAngle(new THREE.Vector3(0,1,0), -Math.PI/4);
-            const checkWhisker = (direction) => { raycaster.set(botCenter, direction); const hits = raycaster.intersectObjects(cachedEnvObstacles); return hits.length > 0 ? hits[0].distance : Infinity; };
+            // Whiskers only need nearby obstacles for avoidance: floor-free list
+            // + a 40-unit ray cap keeps this ~100x cheaper than the old infinite
+            // ray against the full-island floor mesh.
+            const checkWhisker = (direction) => { raycaster.set(botCenter, direction); raycaster.far = 40; const hits = raycaster.intersectObjects(cachedRayObsOnly); raycaster.far = Infinity; return hits.length > 0 ? hits[0].distance : Infinity; };
             const distF = checkWhisker(fDir);
             if (distF < 25) {
                 const distL = checkWhisker(lDir); const distR = checkWhisker(rDir);
@@ -1064,7 +1134,10 @@ function animate() {
     }
 
     if (gamePhase === 'active') {
-        stormRadius -= 12 * delta; if (stormRadius < 50) stormRadius = 50;
+        // Derive radius from the shared match clock so the storm is in the same
+        // place on every client (was a per-frame decrement that drifted).
+        const elapsed = matchStartMs ? (time - matchStartMs) / 1000 : 0;
+        stormRadius = Math.max(50, 4000 - 12 * elapsed);
         stormMesh.position.copy(stormCenter); stormMesh.position.y = 500;
         stormMesh.scale.set(stormRadius, 1, stormRadius);
     }
@@ -1125,9 +1198,11 @@ function animate() {
         }
     }
 
-    // Stream the bots THIS client simulates to the room (runs even while
-    // paused, so everyone's bots keep moving)
-    if (GAME_MODE === 'multi' && socket && bots.length > 0 && time - lastBotSend > BOT_SEND_INTERVAL) {
+    // Stream the bots THIS client simulates to the room. Runs even while the
+    // pointer-lock is released (so bots keep moving), but NOT after the match
+    // ends — a player idling on the victory screen must not leak stale bot
+    // positions into the next match.
+    if (GAME_MODE === 'multi' && socket && !isVictory && bots.length > 0 && time - lastBotSend > BOT_SEND_INTERVAL) {
         lastBotSend = time;
         const state = [];
         for (let i = 0; i < bots.length; i++) {
@@ -1168,24 +1243,43 @@ if (GAME_MODE === 'multi' && socket) {
         }
     });
 
-    socket.on('player_joined', ({ id, name }) => {
-        if (!mpPlayers[id]) mpPlayers[id] = { mesh: null, isInfected: false, isGliding: true, landed: false, name, targetPos: null, snapped: false };
+    socket.on('player_joined', ({ id, name, isInfected }) => {
+        if (!mpPlayers[id]) mpPlayers[id] = { mesh: null, isInfected: !!isInfected, isGliding: true, landed: false, name, targetPos: null, snapped: false };
         if (sharedBotGeometry) getOrCreateMpMesh(id);
+        rebuildSortedIds(); // roster changed → bot ownership map changes
         survivorsLeft++;
         document.getElementById('survivors-count').innerText = survivorsLeft;
-        logFeed(`${name} joined!`, '#aaaaff');
+        logFeed(`${name || 'A player'} joined!`, '#aaaaff');
     });
 
     socket.on('player_left', ({ id }) => {
         if (mpPlayers[id] && mpPlayers[id].mesh) { scene.remove(mpPlayers[id].mesh); }
         if (mpPlayers[id] && !mpPlayers[id].isInfected) { survivorsLeft--; document.getElementById('survivors-count').innerText = survivorsLeft; }
         delete mpPlayers[id];
+        rebuildSortedIds();
+    });
+
+    socket.on('new_host', ({ id }) => {
+        iAmHost = (id === socket.id);
+    });
+
+    socket.on('virus_pick', ({ bots: botPicks, players: playerPicks, activeAt }) => {
+        // Align the shared match clock to the server's authoritative start
+        if (activeAt) matchStartMs = performance.now() - (Date.now() - activeAt);
+        applyVirusPicks(botPicks, playerPicks);
     });
 
     socket.on('infected', ({ targetId, byId, byName }) => {
         if (targetId === socket.id) {
             infectPlayer(byName || 'a Player');
         } else {
+            // Create the entry if the infection arrives before the player is
+            // registered, so we never lose an infection (and the count stays right).
+            if (!mpPlayers[targetId]) {
+                mpPlayers[targetId] = { mesh: null, isInfected: false, isGliding: true, landed: false, name: byName, targetPos: null, snapped: false };
+                if (sharedBotGeometry) getOrCreateMpMesh(targetId);
+                rebuildSortedIds();
+            }
             infectMpPlayer(targetId, byName || 'a Player');
         }
     });
@@ -1212,13 +1306,8 @@ if (GAME_MODE === 'multi' && socket) {
     });
 
     socket.on('game_over', ({ result }) => {
-        if (isVictory) return;
-        isVictory = true; controls.unlock();
-        document.getElementById('victory').innerText = result === 'infection' ? 'INFECTION WINS!' : 'SURVIVORS WIN!';
-        document.getElementById('victory').style.color = result === 'infection' ? '#33ff33' : '#ff3333';
-        document.getElementById('victory').style.display = 'block';
-        document.getElementById('back-to-lobby').style.display = 'block';
-        document.getElementById('blocker').style.display = 'flex';
+        // Server is authoritative for the outcome; always render what it says.
+        declareVictory(result === 'infection');
     });
 
     socket.on('disconnect', () => {
@@ -1242,6 +1331,7 @@ if (GAME_MODE === 'multi' && socket) {
             return;
         }
         WORLD_SEED = res.seed >>> 0;
+        iAmHost = (res.hostId === socket.id);
         // Fill the match to 41 total entities (same count on every client)
         BOT_COUNT = Math.max(0, 41 - (res.matchPlayers || 1));
         // Pre-register players already in the room so meshes + survivor
@@ -1250,6 +1340,9 @@ if (GAME_MODE === 'multi' && socket) {
             if (p.id === socket.id) return;
             mpPlayers[p.id] = { mesh: null, isInfected: !!p.isInfected, isGliding: true, landed: false, name: p.name, targetPos: null, snapped: false };
         });
+        rebuildSortedIds();
+        // Stash any live-match snapshot to apply once the world has loaded
+        pendingSnapshot = (res.state === 'ingame') ? res.snapshot : null;
         initRng();
         processLoadingTasks();
     });
