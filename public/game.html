@@ -364,11 +364,14 @@ function scheduleMusic() {
         // heartbeat: louder and the "dub" tightens toward the "lub" as it intensifies
         heartbeat(t, 0.3 + 0.28 * I);
         heartbeat(t + beatDur * (0.3 - 0.08 * I), 0.18 + 0.22 * I);
-        // dissonant bell motifs — denser with intensity
+        // dissonant bell motifs — denser with intensity, quantised to the beat
+        // grid (on the beat, or cleanly on the "and") so they lock to the pulse
+        // instead of floating with a random offset.
         if (Math.random() < (active ? 0.2 + 0.4 * I : 0.22)) {
             const pool = Math.random() < 0.5 + 0.3 * I ? TENSION_NOTES : PHRYG;
             const m = pool[Math.floor(Math.random() * pool.length)] + (Math.random() < 0.3 ? 12 : 0);
-            bell(midiFreq(m), t + Math.random() * beatDur * 0.5, 0.12 + 0.06 * I);
+            const off = Math.random() < 0.35 ? beatDur * 0.5 : 0; // on-beat or the "and"
+            bell(midiFreq(m), t + off, 0.12 + 0.06 * I);
         }
         // dissonant pad swell every 8 beats, thicker with intensity
         if (beat % 8 === 0) padSwell([33, 34, 40], t, 0.09 + 0.1 * I, beatDur * 8);
