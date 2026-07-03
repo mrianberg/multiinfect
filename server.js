@@ -198,27 +198,29 @@ io.on('connection', (socket) => {
         io.to(socket.roomId).emit('game_start');
     });
 
-    // Host announces the first-infection picks (storm). Host-authoritative so
-    // every client applies an identical set regardless of local RNG state.
-    socket.on('virus_pick', (data) => {
+    // Host marks the active phase start; sets the authoritative match clock.
+    socket.on('begin_active', () => {
+        const room = rooms.get(socket.roomId);
+        if (!room || room.state !== 'ingame' || room.hostId !== socket.id) return;
+        room.activeAt = Date.now();
+        io.to(socket.roomId).emit('begin_active', { activeAt: room.activeAt });
+    });
+
+    // Host seeds an infection via lightning (once per minute). Host-authoritative
+    // target; relayed to everyone so the strike + infection appear on all clients.
+    socket.on('lightning', (data) => {
         const room = rooms.get(socket.roomId);
         if (!room || room.state !== 'ingame' || room.hostId !== socket.id) return;
         if (!data || typeof data !== 'object') return;
-        const botCap = MAX_MATCH_ENTITIES;
-        const bots = Array.isArray(data.bots)
-            ? data.bots.filter(i => Number.isInteger(i) && i >= 0 && i < botCap).slice(0, 4)
-            : [];
-        const players = Array.isArray(data.players)
-            ? data.players.filter(id => typeof id === 'string' && room.players.has(id)).slice(0, 4)
-            : [];
-        bots.forEach(i => room.botsInfected.add(i));
-        players.forEach(id => {
-            room.infectedPlayers.add(id);
-            const p = room.players.get(id);
-            if (p) p.isInfected = true;
-        });
-        room.activeAt = Date.now(); // authoritative match-timer start
-        io.to(socket.roomId).emit('virus_pick', { bots, players, activeAt: room.activeAt });
+        const out = {};
+        if (Number.isInteger(data.bot) && data.bot >= 0 && data.bot < MAX_MATCH_ENTITIES) {
+            if (!room.botsInfected.has(data.bot)) { room.botsInfected.add(data.bot); out.bot = data.bot; }
+        }
+        if (typeof data.player === 'string' && room.players.has(data.player)) {
+            const p = room.players.get(data.player);
+            if (p && !p.isInfected) { p.isInfected = true; room.infectedPlayers.add(data.player); out.player = data.player; }
+        }
+        if (out.bot !== undefined || out.player !== undefined) io.to(socket.roomId).emit('lightning', out);
     });
 
     // Per-frame position update — thin relay, clients handle physics locally

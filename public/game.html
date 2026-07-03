@@ -423,6 +423,22 @@ function noiseBurst(t, dur, gain, filtType, f0, f1, Q, rev) {
     s.connect(f); f.connect(g); g.connect(sfxGain); if (rev) revSend(g, rev);
     s.start(t); s.stop(t + dur + 0.02);
 }
+// Rumble-lightning: a bright crack + hiss over a low rolling rumble, for each
+// infection strike. Throttled so a cascade rolls like a thunderstorm.
+let lastThunder = 0;
+function sfxThunder() {
+    if (!audioReady) return;
+    const now = performance.now();
+    if (now - lastThunder < 90) return;
+    lastThunder = now;
+    const t = audioCtx.currentTime;
+    noiseBurst(t, 0.1, 0.28, 'highpass', 3500, 900, 1, 0.3);   // crack
+    noiseBurst(t + 0.01, 0.32, 0.16, 'highpass', 6500, 3800, 0.8, 0.3); // hiss
+    const s = audioCtx.createBufferSource(); s.buffer = noiseBuffer;
+    const f = audioCtx.createBiquadFilter(); f.type = 'lowpass'; f.frequency.setValueAtTime(220, t); f.frequency.exponentialRampToValueAtTime(55, t + 0.9);
+    const g = audioCtx.createGain(); g.gain.setValueAtTime(0.0001, t); g.gain.linearRampToValueAtTime(0.5, t + 0.05); g.gain.exponentialRampToValueAtTime(0.001, t + 1.0);
+    s.connect(f); f.connect(g); g.connect(sfxGain); revSend(g, 0.5); s.start(t); s.stop(t + 1.05);
+}
 // Short creepy hit whenever ANY bot / remote player gets infected. Pitch varies
 // per call and it's throttled so an infection cascade becomes an unsettling
 // flurry rather than a wall of noise.
@@ -509,7 +525,6 @@ let phaseTimer = 0;
 let nightFadeProgress = 0;
 let stormCenter = new THREE.Vector3(0, 0, 0);
 let stormRadius = 4000;
-let stormCeiling = 100000; // effectively "off" until the endgame lowers it
 
 // Storm shrinks continuously for the whole match — fast at first, easing off
 // over time (never plateaus, never stops early). Purely a function of elapsed
@@ -517,14 +532,6 @@ let stormCeiling = 100000; // effectively "off" until the endgame lowers it
 const STORM_START_RADIUS = 4000;
 const STORM_END_RADIUS = 300; // leaves a real arena, not a pinprick
 const STORM_DURATION = 300;   // shrink spans the full match clock
-// In the final stretch the storm also closes in from the TOP: a ceiling
-// descends over the safe zone, squeezing anyone up high (e.g. on a tower).
-const CEIL_START_T = 230, CEIL_END_T = 300, CEIL_HIGH = 450, CEIL_LOW = 60;
-function stormCeilingAt(elapsed) {
-    if (elapsed < CEIL_START_T) return 100000;
-    const k = Math.min(1, (elapsed - CEIL_START_T) / (CEIL_END_T - CEIL_START_T));
-    return CEIL_HIGH - (CEIL_HIGH - CEIL_LOW) * k;
-}
 
 // Returns { radius, remaining } for a given elapsed-seconds value. Cubic
 // ease-out: shrink rate is fastest at t=0 and tapers smoothly to ~0 by the
@@ -543,12 +550,57 @@ stormMesh.position.y = 500;
 scene.add(stormMesh);
 stormMesh.visible = false;
 
-// Descending storm ceiling (a glowing lid that closes over the arena at the end)
-const ceilGeo = new THREE.CircleGeometry(1, 48); ceilGeo.rotateX(Math.PI / 2); // face down
-const ceilMat = new THREE.MeshBasicMaterial({ color: 0xaa33ff, transparent: true, opacity: 0.28, side: THREE.DoubleSide, depthWrite: false });
-const ceilMesh = new THREE.Mesh(ceilGeo, ceilMat);
-scene.add(ceilMesh);
-ceilMesh.visible = false;
+// ─── Infection lightning VFX ──────────────────────────────────────────────────
+// A bright neon-green bolt strikes every newly-infected entity.
+const lightningMat = new THREE.LineBasicMaterial({ color: 0x66ff66, transparent: true, opacity: 1, blending: THREE.AdditiveBlending, depthWrite: false });
+const flashTex = (() => {
+    const c = document.createElement('canvas'); c.width = c.height = 64;
+    const ctx = c.getContext('2d'); const g = ctx.createRadialGradient(32, 32, 0, 32, 32, 32);
+    g.addColorStop(0, 'rgba(180,255,180,0.95)'); g.addColorStop(0.4, 'rgba(60,255,60,0.5)'); g.addColorStop(1, 'rgba(60,255,60,0)');
+    ctx.fillStyle = g; ctx.fillRect(0, 0, 64, 64);
+    return new THREE.CanvasTexture(c);
+})();
+const flashMat = new THREE.SpriteMaterial({ map: flashTex, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending });
+const activeLightnings = [];
+function spawnLightning(x, z) {
+    if (activeLightnings.length > 26) return; // cap during cascades
+    const groundY = getTerrainHeight(x, z);
+    const topY = 560, segs = 12;
+    const grp = new THREE.Group();
+    for (let strand = 0; strand < 3; strand++) {
+        const pts = [];
+        for (let i = 0; i <= segs; i++) {
+            const f = i / segs;
+            const edge = (i === 0 || i === segs) ? 0 : 1;
+            const spread = 34 * (1 - Math.abs(f - 0.5) * 1.6) * edge;
+            pts.push(new THREE.Vector3(x + (Math.random() - 0.5) * spread, topY + (groundY - topY) * f, z + (Math.random() - 0.5) * spread));
+        }
+        const geo = new THREE.BufferGeometry().setFromPoints(pts);
+        grp.add(new THREE.Line(geo, lightningMat.clone()));
+    }
+    const flash = new THREE.Sprite(flashMat.clone());
+    flash.position.set(x, groundY + 4, z); flash.scale.set(70, 70, 1);
+    grp.add(flash);
+    scene.add(grp);
+    activeLightnings.push({ grp, life: 0.4, maxLife: 0.4 });
+}
+function updateLightnings(delta) {
+    for (let i = activeLightnings.length - 1; i >= 0; i--) {
+        const L = activeLightnings[i];
+        L.life -= delta;
+        if (L.life <= 0) {
+            L.grp.traverse(o => { if (o.geometry) o.geometry.dispose(); if (o.material) o.material.dispose(); });
+            scene.remove(L.grp);
+            activeLightnings.splice(i, 1);
+            continue;
+        }
+        // flicker for the first ~half, then fade out
+        const k = L.life / L.maxLife;
+        const op = k > 0.5 ? (0.6 + Math.random() * 0.4) : k * 2;
+        L.grp.traverse(o => { if (o.material) o.material.opacity = op; });
+    }
+}
+function strikeLightning(x, z) { spawnLightning(x, z); sfxThunder(); }
 
 function getTerrainHeight(x, z) {
     const hill1 = Math.sin(x * 0.0025) * Math.cos(z * 0.0025) * 60;
@@ -630,6 +682,13 @@ const towers = [];
 // so this clears the ramps/pad; the entrance sits ~34u out, still reachable
 // from just outside the boundary so a roamer can commit and then walk in).
 const TOWER_KEEPOUT = 48;
+// Cabin centres — a survivor sheltering near one is a bit less likely to be
+// struck by the infection lightning.
+const houses = [];
+function isInsideHouse(x, z) {
+    for (let i = 0; i < houses.length; i++) { const dx = x - houses[i].x, dz = z - houses[i].z; if (dx * dx + dz * dz < 500) return true; } // ~22u
+    return false;
+}
 let cachedEnvObstacles = []; let cachedRayObsOnly = [];
 
 function getSafeSpawnPos(rng = Math.random) {
@@ -888,6 +947,7 @@ for (let c = 0; c < 2; c++) {
                     const roofMesh = new THREE.Mesh(roofGeo, roofMat); roofMesh.position.y = 42.5;
                     bGroup.add(houseMesh); bGroup.add(roofMesh); scene.add(bGroup);
                     buildings.push(bGroup); buildingMeshes.push(houseMesh, roofMesh);
+                    houses.push({ x: px, z: pz });
                     const addWallCol = (w, h, d, rx, ry, rz) => {
                         if (isRotated) addCollider(d,h,w,px+rz,py+ry,pz-rx);
                         else addCollider(w,h,d,px+rx,py+ry,pz+rz);
@@ -998,6 +1058,8 @@ function processLoadingTasks() {
             if (snap.matchElapsed > 0) {
                 beginActivePhase();
                 matchStartMs = performance.now() - snap.matchElapsed * 1000;
+                // Don't re-seed strikes that already happened before this rejoin.
+                strikesFired = Math.min(5, Math.floor(snap.matchElapsed / 60) + 1);
             }
         }
 
@@ -1039,6 +1101,7 @@ function logFeed(msg, color) {
 
 let matchTimerId = null;
 let matchStartMs = 0; // wall-clock start of the active phase (shared via server)
+let strikesFired = 0; // per-minute lightning strikes seeded so far (host/solo)
 
 function beginActivePhase() {
     if (gamePhase === 'active') return;
@@ -1056,47 +1119,64 @@ function beginActivePhase() {
             if (gamePhase !== 'active' || isVictory) return;
             // Derive from a shared start time rather than counting ticks, so
             // backgrounded-tab throttling can't desync the clock across clients.
-            timeRemaining = Math.max(0, 300 - Math.floor((performance.now() - matchStartMs) / 1000));
+            const elapsed = (performance.now() - matchStartMs) / 1000;
+            timeRemaining = Math.max(0, 300 - Math.floor(elapsed));
             let m = Math.floor(timeRemaining / 60); let s = timeRemaining % 60;
             document.getElementById('timer').innerText = `${m<10?'0':''}${m}:${s<10?'0':''}${s}`;
+            // Host/solo seeds one lightning infection at each minute mark
+            // (5:00, 4:00, 3:00, 2:00, 1:00 → elapsed 0/60/120/180/240).
+            if (GAME_MODE !== 'multi' || iAmHost) {
+                while (strikesFired < 5 && elapsed >= strikesFired * 60) { lightningStrike(); strikesFired++; }
+            }
             if (timeRemaining <= 0) checkWinCondition();
         }, 250);
     }
 }
 
 function triggerFirstInfection() {
+    // No longer seeds infections directly — the infection now arrives as a
+    // lightning strike once per minute (see the match-timer loop). This just
+    // starts the active phase; the host syncs the shared clock.
     beginActivePhase();
-    // Host (or solo) chooses the first two infections and broadcasts them, so
-    // every client applies an identical set even if the roster changed during
-    // the drop. Non-host clients wait for the 'virus_pick' event.
-    if (GAME_MODE === 'multi' && !iAmHost) return;
+    if (GAME_MODE === 'multi' && iAmHost && socket) socket.emit('begin_active');
+}
 
-    let botPicks = [], playerPicks = [];
-    let pool = [];
-    if (GAME_MODE === 'multi') _sortedIds.forEach(id => pool.push({ type: 'player', id }));
-    else pool.push({ type: 'player', id: 'me' });
-    for (let i = 0; i < bots.length; i++) pool.push({ type: 'bot', index: i });
+// Pick a survivor for the next lightning strike. Weighted like real lightning:
+// the higher off the ground you are the more likely you are struck; sheltering
+// in a house lowers the odds. Host/solo only — the result is broadcast.
+function pickWeightedSurvivor() {
+    const cands = [];
+    for (let i = 0; i < bots.length; i++) { const b = bots[i]; if (!b.isInfected && b.landed) cands.push({ type: 'bot', index: i, x: b.position.x, z: b.position.z, y: b.position.y }); }
+    if (!playerIsInfected && playerLanded) cands.push({ type: 'player', id: (GAME_MODE === 'multi' ? socket.id : 'me'), x: camera.position.x, z: camera.position.z, y: camera.position.y - 12 });
+    if (GAME_MODE === 'multi') Object.entries(mpPlayers).forEach(([id, p]) => { if (!p.isInfected && p.mesh && p.landed) cands.push({ type: 'player', id, x: p.mesh.position.x, z: p.mesh.position.z, y: p.mesh.position.y }); });
+    if (cands.length === 0) return null;
+    let total = 0;
+    cands.forEach(c => {
+        const h = Math.max(0, c.y - getTerrainHeight(c.x, c.z));
+        let w = 1 + h * 0.03;                        // higher up = more likely
+        if (isInsideHouse(c.x, c.z)) w *= 0.5;       // sheltered = less likely
+        c.w = w; total += w;
+    });
+    let r = Math.random() * total;
+    for (const c of cands) { r -= c.w; if (r <= 0) return c; }
+    return cands[cands.length - 1];
+}
 
-    for (let i = 0; i < 2 && pool.length > 0; i++) {
-        let r = Math.floor(stormRand() * pool.length);
-        let target = pool.splice(r, 1)[0];
-        if (target.type === 'bot') botPicks.push(target.index);
-        else playerPicks.push(target.id);
-    }
-
+function lightningStrike() {
+    const pick = pickWeightedSurvivor();
+    if (!pick) return;
     if (GAME_MODE === 'multi' && socket) {
-        socket.emit('virus_pick', { bots: botPicks, players: playerPicks });
+        socket.emit('lightning', pick.type === 'bot' ? { bot: pick.index } : { player: pick.id });
     } else {
-        applyVirusPicks(botPicks, playerPicks);
+        applyLightning(pick.type === 'bot' ? [pick.index] : [], pick.type === 'player' ? [pick.id] : []);
     }
 }
 
-function applyVirusPicks(botPicks, playerPicks) {
-    beginActivePhase();
-    (botPicks || []).forEach(i => { if (bots[i]) infectBot(bots[i], "THE VIRUS"); });
-    (playerPicks || []).forEach(id => {
-        if (GAME_MODE !== 'multi' || id === socket.id) infectPlayer("THE VIRUS");
-        else infectMpPlayer(id, "THE VIRUS");
+function applyLightning(botIdxs, playerIds) {
+    (botIdxs || []).forEach(i => { if (bots[i] && !bots[i].isInfected) infectBot(bots[i], "LIGHTNING"); });
+    (playerIds || []).forEach(id => {
+        if (GAME_MODE !== 'multi' || id === socket.id) infectPlayer("LIGHTNING");
+        else if (mpPlayers[id]) infectMpPlayer(id, "LIGHTNING");
     });
 }
 
@@ -1134,7 +1214,8 @@ function infectBot(bot, infectorName) {
     if (bot.isInfected) return;
     bot.isInfected = true; bot.visualMesh.material[0].copy(infectedMaterial);
     survivorsLeft--; document.getElementById('survivors-count').innerText = survivorsLeft;
-    if (infectorName === "YOU") sfxYouInfected(); else sfxInfect();
+    strikeLightning(bot.position.x, bot.position.z); // neon-green bolt + thunder
+    if (infectorName === "YOU") sfxYouInfected();
     logFeed(`${infectorName} infected a Survivor!`, "#33ff33"); checkWinCondition();
 }
 
@@ -1148,6 +1229,7 @@ function infectPlayer(infectorName) {
     document.getElementById('status-box').style.borderBottomColor = "#33ff33";
     const overlay = document.getElementById('damage-overlay');
     overlay.style.opacity = 1; setTimeout(() => overlay.style.opacity = 0, 800);
+    strikeLightning(camera.position.x, camera.position.z); // struck!
     sfxInfectedYou();
     if (GAME_MODE === 'multi' && socket) socket.emit('i_infected', { byName: infectorName });
     checkWinCondition();
@@ -1159,7 +1241,7 @@ function infectMpPlayer(targetId, byName) {
     p.isInfected = true;
     if (p.mesh) p.mesh.visualMesh.material[0].copy(infectedMaterial);
     survivorsLeft--; document.getElementById('survivors-count').innerText = survivorsLeft;
-    sfxInfect();
+    if (p.mesh) strikeLightning(p.mesh.position.x, p.mesh.position.z);
     logFeed(`${byName} infected a Player!`, "#33ff33"); checkWinCondition();
 }
 
@@ -1170,13 +1252,9 @@ function applyStormPush(position, delta, isPlayer) {
     const dx = stormCenter.x - position.x, dz = stormCenter.z - position.z;
     const distToCenter = Math.sqrt(dx * dx + dz * dz);
     let pushed = false;
-    // Being above the descending ceiling counts as being in the storm: it
-    // drives the entity toward the centre, sliding it off high ground (a tower)
-    // so it then falls back to the safe zone below the ceiling.
-    const aboveCeiling = position.y > stormCeiling;
-    if ((distToCenter > stormRadius || aboveCeiling) && distToCenter > 0) {
+    if (distToCenter > stormRadius && distToCenter > 0) {
         const inv = 1 / distToCenter;
-        const pushSpeed = (aboveCeiling ? 220 : 150) * delta;
+        const pushSpeed = 150 * delta;
         const origX = position.x, origZ = position.z;
         position.x += dx * inv * pushSpeed; position.z += dz * inv * pushSpeed;
         if (checkCollision(position, 3, isPlayer)) {
@@ -1743,16 +1821,6 @@ function animate() {
         stormMesh.position.copy(stormCenter); stormMesh.position.y = 500;
         stormMesh.scale.set(stormRadius, 1, stormRadius);
 
-        // Endgame: the ceiling descends over the safe zone.
-        stormCeiling = stormCeilingAt(elapsed);
-        if (stormCeiling < 900) {
-            ceilMesh.visible = true;
-            ceilMesh.position.set(stormCenter.x, stormCeiling, stormCenter.z);
-            ceilMesh.scale.set(stormRadius, 1, stormRadius);
-        } else {
-            ceilMesh.visible = false;
-        }
-
         if (!isVictory) {
             const alert = document.getElementById('phase-alert');
             if (elapsed >= STORM_DURATION) {
@@ -1839,7 +1907,7 @@ function animate() {
         if (state.length > 0) socket.emit('bots_state', state);
     }
 
-    updateBots(delta, time); updateHorses(delta, time); updateMpPlayers(delta); updateRadar();
+    updateBots(delta, time); updateHorses(delta, time); updateMpPlayers(delta); updateLightnings(delta); updateRadar();
     prevTime = time; renderer.render(scene, camera);
 }
 
@@ -1891,10 +1959,14 @@ if (GAME_MODE === 'multi' && socket) {
         iAmHost = (id === socket.id);
     });
 
-    socket.on('virus_pick', ({ bots: botPicks, players: playerPicks, activeAt }) => {
-        // Align the shared match clock to the server's authoritative start
+    socket.on('begin_active', ({ activeAt }) => {
+        // Host started the active phase — align the shared match clock.
+        beginActivePhase();
         if (activeAt) matchStartMs = performance.now() - (Date.now() - activeAt);
-        applyVirusPicks(botPicks, playerPicks);
+    });
+
+    socket.on('lightning', ({ bot, player }) => {
+        applyLightning(typeof bot === 'number' ? [bot] : [], player != null ? [player] : []);
     });
 
     socket.on('infected', ({ targetId, byId, byName }) => {
