@@ -509,6 +509,7 @@ let phaseTimer = 0;
 let nightFadeProgress = 0;
 let stormCenter = new THREE.Vector3(0, 0, 0);
 let stormRadius = 4000;
+let stormCeiling = 100000; // effectively "off" until the endgame lowers it
 
 // Storm shrinks continuously for the whole match — fast at first, easing off
 // over time (never plateaus, never stops early). Purely a function of elapsed
@@ -516,6 +517,14 @@ let stormRadius = 4000;
 const STORM_START_RADIUS = 4000;
 const STORM_END_RADIUS = 300; // leaves a real arena, not a pinprick
 const STORM_DURATION = 300;   // shrink spans the full match clock
+// In the final stretch the storm also closes in from the TOP: a ceiling
+// descends over the safe zone, squeezing anyone up high (e.g. on a tower).
+const CEIL_START_T = 230, CEIL_END_T = 300, CEIL_HIGH = 450, CEIL_LOW = 60;
+function stormCeilingAt(elapsed) {
+    if (elapsed < CEIL_START_T) return 100000;
+    const k = Math.min(1, (elapsed - CEIL_START_T) / (CEIL_END_T - CEIL_START_T));
+    return CEIL_HIGH - (CEIL_HIGH - CEIL_LOW) * k;
+}
 
 // Returns { radius, remaining } for a given elapsed-seconds value. Cubic
 // ease-out: shrink rate is fastest at t=0 and tapers smoothly to ~0 by the
@@ -533,6 +542,13 @@ const stormMesh = new THREE.Mesh(stormGeo, stormMat);
 stormMesh.position.y = 500;
 scene.add(stormMesh);
 stormMesh.visible = false;
+
+// Descending storm ceiling (a glowing lid that closes over the arena at the end)
+const ceilGeo = new THREE.CircleGeometry(1, 48); ceilGeo.rotateX(Math.PI / 2); // face down
+const ceilMat = new THREE.MeshBasicMaterial({ color: 0xaa33ff, transparent: true, opacity: 0.28, side: THREE.DoubleSide, depthWrite: false });
+const ceilMesh = new THREE.Mesh(ceilGeo, ceilMat);
+scene.add(ceilMesh);
+ceilMesh.visible = false;
 
 function getTerrainHeight(x, z) {
     const hill1 = Math.sin(x * 0.0025) * Math.cos(z * 0.0025) * 60;
@@ -610,6 +626,10 @@ const buildings = []; const buildingMeshes = []; const treeMeshes = []; const cr
 // beelining, which is what makes the climb deterministic. Geometry + this
 // chain were validated together in an offline bot-movement simulation.
 const towers = [];
+// Non-climbing bots are kept this far from a tower's centre (footprint is ±36,
+// so this clears the ramps/pad; the entrance sits ~34u out, still reachable
+// from just outside the boundary so a roamer can commit and then walk in).
+const TOWER_KEEPOUT = 48;
 let cachedEnvObstacles = []; let cachedRayObsOnly = [];
 
 function getSafeSpawnPos(rng = Math.random) {
@@ -1149,18 +1169,24 @@ function applyStormPush(position, delta, isPlayer) {
     // the player each frame once the storm is closing in.
     const dx = stormCenter.x - position.x, dz = stormCenter.z - position.z;
     const distToCenter = Math.sqrt(dx * dx + dz * dz);
-    if (distToCenter > stormRadius && distToCenter > 0) {
+    let pushed = false;
+    // Being above the descending ceiling counts as being in the storm: it
+    // drives the entity toward the centre, sliding it off high ground (a tower)
+    // so it then falls back to the safe zone below the ceiling.
+    const aboveCeiling = position.y > stormCeiling;
+    if ((distToCenter > stormRadius || aboveCeiling) && distToCenter > 0) {
         const inv = 1 / distToCenter;
-        const pushSpeed = 150 * delta;
+        const pushSpeed = (aboveCeiling ? 220 : 150) * delta;
         const origX = position.x, origZ = position.z;
         position.x += dx * inv * pushSpeed; position.z += dz * inv * pushSpeed;
         if (checkCollision(position, 3, isPlayer)) {
             position.x = origX; position.z = origZ;
             if (isPlayer) playerVelocityY = 0;
-            position.y += 200 * delta; return true;
+            position.y += 200 * delta;
         }
+        pushed = true;
     }
-    return false;
+    return pushed;
 }
 
 // ─── Horses ───────────────────────────────────────────────────────────────────
@@ -1615,6 +1641,32 @@ function updateBots(delta, time) {
         let hitX = false, hitZ = false;
         bot.position.x += dir.x * speed; if (checkCollision(bot.position, 3)) { bot.position.x -= dir.x * speed; hitX = true; }
         bot.position.z += dir.z * speed; if (checkCollision(bot.position, 3)) { bot.position.z -= dir.z * speed; hitZ = true; }
+        // Tower keep-out: only bots actively climbing may enter a tower's
+        // footprint. If an eligible roamer reaches the entrance it starts the
+        // climb right there; everyone else is ejected to the boundary and turned
+        // away — stops non-climbers wandering under the ramps and jumping
+        // hopelessly.
+        if (!bot.climbTower) {
+            for (let ti = 0; ti < towers.length; ti++) {
+                const tw = towers[ti], tb = tw.base;
+                const tdx = bot.position.x - tb.x, tdz = bot.position.z - tb.z;
+                const td2 = tdx * tdx + tdz * tdz;
+                if (td2 < TOWER_KEEPOUT * TOWER_KEEPOUT) {
+                    const e = tw.entrance;
+                    const edx = bot.position.x - e.x, edz = bot.position.z - e.z;
+                    const nearEntrance = edx * edx + edz * edz < 24 * 24;
+                    const eligible = bot.role === 'roamer' && !bot.isInfected && time > bot.climbCooldown && tw.climbers === 0;
+                    if (nearEntrance && eligible) { startClimb(bot, tw, time); break; }
+                    const td = Math.sqrt(td2) || 0.001;
+                    bot.position.x = tb.x + (tdx / td) * TOWER_KEEPOUT;
+                    bot.position.z = tb.z + (tdz / td) * TOWER_KEEPOUT;
+                    bot.wanderDir.set(tdx / td, 0, tdz / td);
+                    bot.targetPos = bot.position.clone().add(bot.wanderDir.clone().multiplyScalar(50));
+                    bot.hideout = null;
+                    break;
+                }
+            }
+        }
         // The big reactive bump-jumps (velocityY=60) are still suppressed
         // while climbing — a full jump overshoots a 3-unit step and turns
         // the climb into chaotic leaping. Instead, a blocked climbing bot
@@ -1690,6 +1742,16 @@ function animate() {
         stormRadius = Math.max(STORM_END_RADIUS, st.radius);
         stormMesh.position.copy(stormCenter); stormMesh.position.y = 500;
         stormMesh.scale.set(stormRadius, 1, stormRadius);
+
+        // Endgame: the ceiling descends over the safe zone.
+        stormCeiling = stormCeilingAt(elapsed);
+        if (stormCeiling < 900) {
+            ceilMesh.visible = true;
+            ceilMesh.position.set(stormCenter.x, stormCeiling, stormCenter.z);
+            ceilMesh.scale.set(stormRadius, 1, stormRadius);
+        } else {
+            ceilMesh.visible = false;
+        }
 
         if (!isVictory) {
             const alert = document.getElementById('phase-alert');
