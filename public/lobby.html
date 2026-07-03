@@ -48,8 +48,12 @@
   .big-btn .desc { font-size: 13px; color: #777; margin-top: 6px; font-style: italic; }
 
   /* --- Room browser --- */
-  #room-browser { display: none; width: 560px; max-width: 95vw; }
-  #room-browser h2 { font-size: 28px; color: #33ff33; margin-bottom: 16px; }
+  #room-browser, #spectate-browser { display: none; width: 560px; max-width: 95vw; }
+  #room-browser h2, #spectate-browser h2 { font-size: 28px; color: #33ff33; margin-bottom: 16px; }
+  #spectate-list {
+    background: rgba(0,0,0,0.4); border: 2px solid #333; border-radius: 8px;
+    min-height: 180px; max-height: 300px; overflow-y: auto; margin-bottom: 16px;
+  }
   #room-list {
     background: rgba(0,0,0,0.4); border: 2px solid #333; border-radius: 8px;
     min-height: 180px; max-height: 300px; overflow-y: auto; margin-bottom: 16px;
@@ -131,6 +135,11 @@
     <div class="label">PLAY WITH FRIENDS</div>
     <div class="desc">Real players + bots</div>
   </div>
+  <div class="big-btn" id="spectate-btn">
+    <span class="icon">👁️</span>
+    <div class="label">SPECTATE</div>
+    <div class="desc">Watch a live game</div>
+  </div>
 </div>
 
 <!-- Step 3a: Room browser -->
@@ -140,6 +149,15 @@
   <div class="btn-row">
     <button class="btn btn-green" id="host-btn">HOST A GAME</button>
     <button class="btn btn-gray" id="back-from-browser-btn">BACK</button>
+  </div>
+</div>
+
+<!-- Step 3c: Spectate browser -->
+<div id="spectate-browser">
+  <h2>LIVE GAMES</h2>
+  <div id="spectate-list"><div class="empty-rooms">No current games found.</div></div>
+  <div class="btn-row">
+    <button class="btn btn-gray" id="back-from-spectate-btn">BACK</button>
   </div>
 </div>
 
@@ -223,10 +241,11 @@ let players = {}; // id → player data
 const nameSection = document.getElementById('name-section');
 const mainMenu = document.getElementById('main-menu');
 const roomBrowser = document.getElementById('room-browser');
+const spectateBrowser = document.getElementById('spectate-browser');
 const pregameLobby = document.getElementById('pregame-lobby');
 
 function showOnly(el) {
-  [nameSection, mainMenu, roomBrowser, pregameLobby].forEach(e => e.style.display = 'none');
+  [nameSection, mainMenu, roomBrowser, spectateBrowser, pregameLobby].forEach(e => e.style.display = 'none');
   el.style.display = el === mainMenu ? 'flex' : 'block';
 }
 
@@ -255,8 +274,36 @@ document.getElementById('mp-btn').addEventListener('click', () => {
   showOnly(roomBrowser);
 });
 
+document.getElementById('spectate-btn').addEventListener('click', () => {
+  if (!myName) { showOnly(nameSection); return; }
+  socket.emit('get_active_rooms');
+  showOnly(spectateBrowser);
+});
+
 // --- Room browser ---
 document.getElementById('back-from-browser-btn').addEventListener('click', () => showOnly(mainMenu));
+document.getElementById('back-from-spectate-btn').addEventListener('click', () => showOnly(mainMenu));
+
+// --- Spectate browser ---
+socket.on('active_room_list', (list) => {
+  const container = document.getElementById('spectate-list');
+  if (!list.length) { container.innerHTML = '<div class="empty-rooms">No current games found.</div>'; return; }
+  container.innerHTML = '';
+  list.forEach(room => {
+    const div = document.createElement('div');
+    div.className = 'room-item';
+    div.innerHTML = `
+      <div>
+        <div class="room-name">${escHtml(room.name)}</div>
+        <div class="room-host">${room.survivors} survivors left</div>
+      </div>
+      <div class="room-count">${room.playerCount} 👤</div>`;
+    div.addEventListener('click', () => {
+      window.location.href = `/login/game.php?g=multiinfectgame&mode=spectate&room=${room.id}&name=${encodeURIComponent(myName)}`;
+    });
+    container.appendChild(div);
+  });
+});
 
 document.getElementById('host-btn').addEventListener('click', () => {
   const roomName = myName + "'s Game";
@@ -394,6 +441,7 @@ socket.on('game_start', () => {
 // Refresh room list periodically while browsing
 setInterval(() => {
   if (roomBrowser.style.display !== 'none') socket.emit('get_rooms');
+  if (spectateBrowser.style.display !== 'none') socket.emit('get_active_rooms');
 }, 3000);
 
 function escHtml(str) {

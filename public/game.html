@@ -124,9 +124,11 @@
 <script>
 // ─── URL params ───────────────────────────────────────────────────────────────
 const urlParams = new URLSearchParams(window.location.search);
-const GAME_MODE = urlParams.get('mode') || 'solo'; // 'solo' | 'multi'
+const GAME_MODE = urlParams.get('mode') || 'solo'; // 'solo' | 'multi' | 'spectate'
 const ROOM_ID   = urlParams.get('room') || null;
 const MY_NAME   = urlParams.get('name') || 'Player';
+const IS_SPECTATE = GAME_MODE === 'spectate';
+const NET = GAME_MODE === 'multi' || IS_SPECTATE; // networked modes
 
 // ─── Multiplayer setup ────────────────────────────────────────────────────────
 let socket = null;
@@ -145,12 +147,13 @@ function rebuildSortedIds() {
     _sortedIds = Object.keys(mpPlayers).concat(socket ? [socket.id] : []).sort();
 }
 function iOwnBot(i) {
+    if (IS_SPECTATE) return false;       // spectators simulate nothing, just watch
     if (GAME_MODE !== 'multi') return true;
     const n = _sortedIds.length;
     return n > 0 && _sortedIds[i % n] === socket.id;
 }
 
-if (GAME_MODE === 'multi') {
+if (NET) {
     socket = io();
     socket.emit('set_name', MY_NAME);
 }
@@ -600,7 +603,8 @@ function updateLightnings(delta) {
         L.grp.traverse(o => { if (o.material) o.material.opacity = op; });
     }
 }
-function strikeLightning(x, z) { spawnLightning(x, z); sfxThunder(); }
+let suppressStrikeVFX = false; // true while applying a join snapshot (avoid a flash storm)
+function strikeLightning(x, z) { if (suppressStrikeVFX) return; spawnLightning(x, z); sfxThunder(); }
 
 function getTerrainHeight(x, z) {
     const hill1 = Math.sin(x * 0.0025) * Math.cos(z * 0.0025) * 60;
@@ -1035,27 +1039,35 @@ function processLoadingTasks() {
         cachedEnvObstacles = [...cachedRayObsOnly, floor];
 
         // Create mp player meshes now that sharedBotGeometry exists
-        if (GAME_MODE === 'multi') {
+        if (NET) {
             Object.keys(mpPlayers).forEach(id => getOrCreateMpMesh(id));
         }
 
         let safeStart = getSafeSpawnPos();
-        camera.position.set(safeStart.x, 2000, safeStart.z);
-        playerGlider.visible = true;
+        if (IS_SPECTATE) {
+            // Spectator floats high over the island looking down.
+            camera.position.set(safeStart.x, 800, safeStart.z);
+            camera.rotation.x = -0.9;
+        } else {
+            camera.position.set(safeStart.x, 2000, safeStart.z);
+            playerGlider.visible = true;
+        }
 
-        survivorsLeft = bots.length + 1 + (GAME_MODE === 'multi' ? Object.keys(mpPlayers).length : 0);
+        survivorsLeft = bots.length + (IS_SPECTATE ? 0 : 1) + (NET ? Object.keys(mpPlayers).length : 0);
         matchTotalEntities = survivorsLeft;
         document.getElementById('survivors-count').innerText = survivorsLeft;
 
         // Catch up to a match already in progress (rejoin / mid-match load)
         if (pendingSnapshot) {
             const snap = pendingSnapshot; pendingSnapshot = null;
+            suppressStrikeVFX = true; // don't flash a bolt for every already-infected entity
             (snap.botsInfected || []).forEach(i => { if (bots[i]) infectBot(bots[i], 'Infected'); });
             (snap.infectedPlayers || []).forEach(id => {
-                if (id === socket.id) infectPlayer('the Virus');
+                if (!IS_SPECTATE && id === socket.id) infectPlayer('the Virus');
                 else if (mpPlayers[id]) infectMpPlayer(id, 'the Virus');
             });
-            if (snap.matchElapsed > 0) {
+            suppressStrikeVFX = false;
+            if (snap.matchElapsed > 0 || IS_SPECTATE) {
                 beginActivePhase();
                 matchStartMs = performance.now() - snap.matchElapsed * 1000;
                 // Don't re-seed strikes that already happened before this rejoin.
@@ -1125,7 +1137,8 @@ function beginActivePhase() {
             document.getElementById('timer').innerText = `${m<10?'0':''}${m}:${s<10?'0':''}${s}`;
             // Host/solo seeds one lightning infection at each minute mark
             // (5:00, 4:00, 3:00, 2:00, 1:00 → elapsed 0/60/120/180/240).
-            if (GAME_MODE !== 'multi' || iAmHost) {
+            // Spectators never seed.
+            if (GAME_MODE === 'solo' || (GAME_MODE === 'multi' && iAmHost)) {
                 while (strikesFired < 5 && elapsed >= strikesFired * 60) { lightningStrike(); strikesFired++; }
             }
             if (timeRemaining <= 0) checkWinCondition();
@@ -1175,7 +1188,7 @@ function lightningStrike() {
 function applyLightning(botIdxs, playerIds) {
     (botIdxs || []).forEach(i => { if (bots[i] && !bots[i].isInfected) infectBot(bots[i], "LIGHTNING"); });
     (playerIds || []).forEach(id => {
-        if (GAME_MODE !== 'multi' || id === socket.id) infectPlayer("LIGHTNING");
+        if (!IS_SPECTATE && (GAME_MODE !== 'multi' || id === socket.id)) infectPlayer("LIGHTNING");
         else if (mpPlayers[id]) infectMpPlayer(id, "LIGHTNING");
     });
 }
@@ -1200,7 +1213,7 @@ function checkWinCondition() {
     // Only the authoritative client decides the outcome. Non-host clients
     // render the winner solely from the server 'game_over' event, so all
     // players always see the same result.
-    if (GAME_MODE === 'multi' && !iAmHost) return;
+    if (NET && !iAmHost) return; // only host (or solo) decides; spectators never do
     if (survivorsLeft <= 0) {
         declareVictory(true);
         if (GAME_MODE === 'multi' && socket) socket.emit('game_over', { result: 'infection' });
@@ -1343,7 +1356,7 @@ function updateRadar() {
         }
     });
     // Real players on radar (shown as white dots)
-    if (GAME_MODE === 'multi') {
+    if (NET) {
         Object.values(mpPlayers).forEach(p => {
             if (!p.mesh) return;
             const dx = p.mesh.position.x - camera.position.x; const dz = p.mesh.position.z - camera.position.z;
@@ -1359,11 +1372,19 @@ function updateRadar() {
 // ─── Back button: multi returns to the room's ready-up screen ────────────────
 const backBtn = document.getElementById('back-to-lobby');
 if (GAME_MODE === 'multi') backBtn.innerText = 'BACK TO ROOM';
+if (IS_SPECTATE) backBtn.innerText = 'BACK TO LOBBY';
 backBtn.addEventListener('click', () => {
     window.location.href = GAME_MODE === 'multi'
         ? `/login/game.php?g=multiinfect&room=${ROOM_ID}&name=${encodeURIComponent(MY_NAME)}`
         : '/login/game.php?g=multiinfect';
 });
+
+// Spectator UI: retitle the deploy screen and hide the player's own status box.
+if (IS_SPECTATE) {
+    document.getElementById('game-title').innerText = 'SPECTATING';
+    document.getElementById('instructions').innerHTML = 'Click to Watch<br><br>(WASD: Fly | SPACE / SHIFT: Up / Down | Mouse: Look)';
+    const sb = document.getElementById('status-box'); if (sb) sb.style.display = 'none';
+}
 
 // ─── Controls ─────────────────────────────────────────────────────────────────
 const controls = new THREE.PointerLockControls(camera, document.body);
@@ -1374,13 +1395,14 @@ controls.addEventListener('unlock', () => {
     if (!isVictory) blocker.style.display = 'flex';
 });
 
-const keys = { w: false, a: false, s: false, d: false, space: false };
+const keys = { w: false, a: false, s: false, d: false, space: false, shift: false };
 document.addEventListener('keydown', (e) => {
     if (e.code === 'KeyW' || e.code === 'ArrowUp') keys.w = true;
     if (e.code === 'KeyA' || e.code === 'ArrowLeft') keys.a = true;
     if (e.code === 'KeyS' || e.code === 'ArrowDown') keys.s = true;
     if (e.code === 'KeyD' || e.code === 'ArrowRight') keys.d = true;
     if (e.code === 'Space') keys.space = true;
+    if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') keys.shift = true;
     if (e.code === 'KeyM') toggleMute();
     if (e.code === 'KeyE' && controls.isLocked && !isVictory && !playerIsGliding && gamePhase === 'active') {
         if (playerMountedHorse) { playerMountedHorse.rider = null; playerMountedHorse = null; sfxMount(); }
@@ -1397,6 +1419,7 @@ document.addEventListener('keyup', (e) => {
     if (e.code === 'KeyS' || e.code === 'ArrowDown') keys.s = false;
     if (e.code === 'KeyD' || e.code === 'ArrowRight') keys.d = false;
     if (e.code === 'Space') keys.space = false;
+    if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') keys.shift = false;
 });
 
 // ─── Bot AI ───────────────────────────────────────────────────────────────────
@@ -1445,7 +1468,7 @@ function updateBots(delta, time) {
     }
     let totalLanded = playerLanded ? 1 : 0;
     for (let i = 0; i < bots.length; i++) { if (bots[i].landed) totalLanded++; }
-    if (GAME_MODE === 'multi') {
+    if (NET) {
         Object.values(mpPlayers).forEach(p => { if (p.landed) totalLanded++; });
     }
 
@@ -1499,7 +1522,7 @@ function updateBots(delta, time) {
         }
     }
 
-    if (gamePhase === 'dropping' && totalLanded >= (bots.length + (GAME_MODE === 'multi' ? Object.keys(mpPlayers).length : 0) + 1) * 0.8) {
+    if (gamePhase === 'dropping' && totalLanded >= (bots.length + (NET ? Object.keys(mpPlayers).length : 0) + 1) * 0.8) {
         gamePhase = 'countdown'; phaseTimer = time + 10000;
     } else if (gamePhase === 'countdown') {
         let secondsLeft = Math.ceil((phaseTimer - time) / 1000);
@@ -1510,8 +1533,9 @@ function updateBots(delta, time) {
 
     let botsThinkingThisFrame = 0;
     bots.forEach((bot, botIdx) => {
-        // Bots owned by other players are replicated, not simulated
-        if (GAME_MODE === 'multi' && !iOwnBot(botIdx)) {
+        // Bots owned by other players are replicated, not simulated (spectators
+        // never own any, so they replicate every bot).
+        if (NET && !iOwnBot(botIdx)) {
             if (bot.climbTower) endClimb(bot, 0); // ownership left us — release the tower slot
             if (bot.netTarget) {
                 const k = Math.min(1, delta * 10);
@@ -1767,7 +1791,7 @@ function updateBots(delta, time) {
 
 // ─── Remote player smoothing ─────────────────────────────────────────────────
 function updateMpPlayers(delta) {
-    if (GAME_MODE !== 'multi') return;
+    if (!NET) return;
     const k = Math.min(1, delta * 12);
     Object.values(mpPlayers).forEach(p => {
         if (!p.mesh || !p.targetPos) return;
@@ -1835,7 +1859,22 @@ function animate() {
 
     playerHitbox.position.copy(camera.position); playerHitbox.position.y -= 6;
 
-    if (controls.isLocked === true && !isVictory) {
+    if (IS_SPECTATE) {
+        // Free-fly spectator camera: look with the mouse, WASD to move, SPACE up
+        // / SHIFT down. No collision, no gravity.
+        if (controls.isLocked) {
+            const fly = 260 * delta;
+            direction.z = Number(keys.w) - Number(keys.s); direction.x = Number(keys.d) - Number(keys.a);
+            if (direction.lengthSq() > 0) direction.normalize();
+            const look = new THREE.Vector3(); camera.getWorldDirection(look);
+            const right = new THREE.Vector3().crossVectors(look, camera.up).normalize();
+            camera.position.addScaledVector(look, direction.z * fly);
+            camera.position.addScaledVector(right, direction.x * fly);
+            if (keys.space) camera.position.y += fly;
+            if (keys.shift) camera.position.y -= fly;
+            camera.position.y = Math.max(getTerrainHeight(camera.position.x, camera.position.z) + 10, camera.position.y);
+        }
+    } else if (controls.isLocked === true && !isVictory) {
         const isMounted = playerMountedHorse !== null;
         const currentFeetY = camera.position.y - (isMounted ? 22 : 12);
         const targetFloorY = getFloorHeight(camera.position.x, camera.position.z, currentFeetY) + (isMounted ? 22 : 12);
@@ -1912,7 +1951,7 @@ function animate() {
 }
 
 // ─── Multiplayer socket events ────────────────────────────────────────────────
-if (GAME_MODE === 'multi' && socket) {
+if (NET && socket) {
     socket.on('pos_update', ({ id, x, y, z, rotY, isGliding, landed, mounted }) => {
         const entry = getOrCreateMpMesh(id);
         if (!entry) return;
@@ -2023,29 +2062,33 @@ window.addEventListener('resize', () => {
 
 // In multi mode the shared world seed must arrive BEFORE world generation,
 // so join the room first and only then start loading.
-if (GAME_MODE === 'multi' && socket) {
-    socket.emit('join_room', ROOM_ID, (res) => {
-        if (!res.ok) {
-            alert('Could not connect to room: ' + (res.error || 'Unknown error'));
-            window.location.href = '/login/game.php?g=multiinfect';
-            return;
-        }
-        WORLD_SEED = res.seed >>> 0;
-        iAmHost = (res.hostId === socket.id);
-        // Fill the match to 41 total entities (same count on every client)
-        BOT_COUNT = Math.max(0, 41 - (res.matchPlayers || 1));
-        // Pre-register players already in the room so meshes + survivor
-        // counts are correct from the start.
-        (res.players || []).forEach(p => {
-            if (p.id === socket.id) return;
-            mpPlayers[p.id] = { mesh: null, isInfected: !!p.isInfected, isGliding: true, landed: false, name: p.name, targetPos: null, snapped: false };
-        });
-        rebuildSortedIds();
-        // Stash any live-match snapshot to apply once the world has loaded
-        pendingSnapshot = (res.state === 'ingame') ? res.snapshot : null;
-        initRng();
-        processLoadingTasks();
+function onJoinResponse(res, spectate) {
+    if (!res.ok) {
+        alert((spectate ? 'Could not spectate: ' : 'Could not connect to room: ') + (res.error || 'Unknown error'));
+        window.location.href = '/login/game.php?g=multiinfect';
+        return;
+    }
+    WORLD_SEED = res.seed >>> 0;
+    iAmHost = !spectate && (res.hostId === socket.id);
+    // Fill the match to 41 total entities (same count on every client)
+    BOT_COUNT = Math.max(0, 41 - (res.matchPlayers || 1));
+    // Register all current players (spectators register everyone including the
+    // host, since they aren't one of them).
+    (res.players || []).forEach(p => {
+        if (!spectate && p.id === socket.id) return;
+        mpPlayers[p.id] = { mesh: null, isInfected: !!p.isInfected, isGliding: true, landed: false, name: p.name, targetPos: null, snapped: false };
     });
+    rebuildSortedIds();
+    // Spectators always join a live match, so always apply the snapshot.
+    pendingSnapshot = (spectate || res.state === 'ingame') ? res.snapshot : null;
+    initRng();
+    processLoadingTasks();
+}
+
+if (IS_SPECTATE && socket) {
+    socket.emit('spectate_room', ROOM_ID, (res) => onJoinResponse(res, true));
+} else if (GAME_MODE === 'multi' && socket) {
+    socket.emit('join_room', ROOM_ID, (res) => onJoinResponse(res, false));
 } else {
     initRng();
     processLoadingTasks();

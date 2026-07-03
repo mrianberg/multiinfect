@@ -55,6 +55,19 @@ function broadcastRoomList() {
     io.emit('room_list', getRoomList());
 }
 
+// In-progress games available to spectate.
+function getActiveRoomList() {
+    const list = [];
+    for (const [id, room] of rooms) {
+        if (room.state === 'ingame' && room.players.size > 0) {
+            let survivors = 0;
+            for (const p of room.players.values()) if (!p.isInfected) survivors++;
+            list.push({ id, name: room.name, playerCount: room.players.size, survivors });
+        }
+    }
+    return list;
+}
+
 function makePlayer(socket, isHost) {
     return {
         id: socket.id,
@@ -106,6 +119,31 @@ io.on('connection', (socket) => {
 
     socket.on('get_rooms', () => {
         socket.emit('room_list', getRoomList());
+    });
+
+    socket.on('get_active_rooms', () => {
+        socket.emit('active_room_list', getActiveRoomList());
+    });
+
+    // Spectate an in-progress game: join the socket.io room to receive its
+    // broadcasts, but do NOT become a player (not counted, can't act).
+    socket.on('spectate_room', (roomId, callback) => {
+        if (typeof callback !== 'function') return;
+        const room = rooms.get(roomId);
+        if (!room || room.state !== 'ingame') return callback({ ok: false, error: 'Game not available' });
+        leaveCurrentRoom();
+        socket.join(roomId);
+        socket.spectatingRoom = roomId;
+        callback({
+            ok: true, roomId, seed: room.seed, name: room.name,
+            hostId: room.hostId, matchPlayers: room.matchPlayerCount || room.players.size,
+            players: Array.from(room.players.values()),
+            snapshot: {
+                botsInfected: Array.from(room.botsInfected),
+                infectedPlayers: Array.from(room.infectedPlayers),
+                matchElapsed: room.activeAt ? Math.floor((Date.now() - room.activeAt) / 1000) : 0,
+            },
+        });
     });
 
     socket.on('create_room', (roomName, callback) => {
