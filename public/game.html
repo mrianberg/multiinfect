@@ -59,6 +59,29 @@
         font-family: 'Arial', sans-serif; font-size: 13px; color: #aaa;
         text-shadow: 1px 1px 2px #000; opacity: 0; transition: opacity 0.8s ease;
     }
+    #chat-log {
+        position: absolute; bottom: 110px; left: 40px; width: 360px; max-height: 190px;
+        display: flex; flex-direction: column; gap: 4px; overflow: hidden;
+        z-index: 250; pointer-events: none;
+    }
+    .chat-line {
+        font-family: 'Arial', sans-serif; font-size: 15px; color: #fff;
+        text-shadow: 1px 1px 2px #000; background: rgba(0,0,0,0.4);
+        padding: 4px 10px; border-radius: 4px; transition: opacity 0.6s ease;
+    }
+    .chat-line .chat-name { color: #33ff33; font-weight: bold; }
+    #chat-input-wrap {
+        position: absolute; bottom: 70px; left: 40px; width: 360px; display: none; z-index: 250;
+    }
+    #chat-input-wrap input {
+        width: 100%; box-sizing: border-box; padding: 8px 12px; font-size: 15px;
+        font-family: 'Arial', sans-serif; background: rgba(0,0,0,0.8);
+        border: 2px solid #33ff33; color: #fff; border-radius: 6px; outline: none;
+    }
+    #chat-hint {
+        position: absolute; bottom: 46px; left: 40px; font-family: 'Arial', sans-serif;
+        font-size: 12px; color: #888; text-shadow: 1px 1px 2px #000; z-index: 100; pointer-events: none;
+    }
     #damage-overlay {
         position: absolute; top: 0; left: 0; width: 100%; height: 100%;
         background-color: rgba(34, 255, 34, 0.5); pointer-events: none;
@@ -114,6 +137,9 @@
 <canvas id="radar" width="160" height="160"></canvas>
 <div id="audio-hint">♪ M to mute</div>
 <div id="killfeed"></div>
+<div id="chat-log"></div>
+<div id="chat-input-wrap"><input id="chat-input" type="text" maxlength="140" placeholder="Say something..."></div>
+<div id="chat-hint">Press ENTER to chat</div>
 
 <div id="ui-container">
     <div class="ui-element" id="status-box">STATUS: <span id="status-text">SURVIVOR</span></div>
@@ -129,6 +155,11 @@ const ROOM_ID   = urlParams.get('room') || null;
 const MY_NAME   = urlParams.get('name') || 'Player';
 const IS_SPECTATE = GAME_MODE === 'spectate';
 const NET = GAME_MODE === 'multi' || IS_SPECTATE; // networked modes
+// Battle-royale ruleset, chosen in the lobby before the match starts:
+// 'classic' — 2 survivors turn infected at the 5:00 mark, no lightning
+// 'lightning' — a lightning bolt infects one survivor every minute (default)
+// 'openstorm' — no wall; straying past the safe-zone edge risks a storm strike
+const RULESET = urlParams.get('ruleset') || 'lightning';
 
 // ─── Multiplayer setup ────────────────────────────────────────────────────────
 let socket = null;
@@ -346,7 +377,7 @@ const TENSION_NOTES = [46, 53, 58, 60, 65]; // Bb, F, Bb(oct), C, F — the unea
 // little with match time — so the score winds tighter and faster the more the
 // virus spreads.
 function musicIntensity() {
-    if (gamePhase !== 'active') return 0;
+    if (gamePhase !== 'active' || survivorsLeft >= matchTotalEntities) return 0; // nobody infected yet — stay calm
     const frac = matchTotalEntities > 0 ? Math.max(0, Math.min(1, 1 - survivorsLeft / matchTotalEntities)) : 0;
     const elapsed = matchStartMs ? (performance.now() - matchStartMs) / 1000 : 0;
     const tprog = Math.min(1, elapsed / 300);
@@ -354,7 +385,10 @@ function musicIntensity() {
 }
 function scheduleMusic() {
     if (!audioReady || audioMuted) return;
-    const active = gamePhase === 'active';
+    // Stay in the calm ambient branch until the first infection actually lands,
+    // even once the match clock/storm has started — the dread ramp is a
+    // reaction to the virus spreading, not to the timer running.
+    const active = gamePhase === 'active' && survivorsLeft < matchTotalEntities;
     const I = musicIntensity(); // 0 pre-infection, 0.2 → 1.0 as it spreads
     // drone opens up, brightens and thickens with intensity
     if (droneGain) droneGain.gain.setTargetAtTime(active ? 0.16 + 0.16 * I : 0.16, audioCtx.currentTime, 1.5);
@@ -568,7 +602,7 @@ const activeLightnings = [];
 function spawnLightning(x, z) {
     if (activeLightnings.length > 26) return; // cap during cascades
     const groundY = getTerrainHeight(x, z);
-    const topY = 560, segs = 12;
+    const topY = 1400, segs = 16;
     const grp = new THREE.Group();
     for (let strand = 0; strand < 3; strand++) {
         const pts = [];
@@ -604,7 +638,7 @@ function updateLightnings(delta) {
     }
 }
 let suppressStrikeVFX = false; // true while applying a join snapshot (avoid a flash storm)
-function strikeLightning(x, z) { if (suppressStrikeVFX) return; spawnLightning(x, z); sfxThunder(); }
+function strikeLightning(x, z) { if (suppressStrikeVFX || RULESET === 'classic') return; spawnLightning(x, z); sfxThunder(); }
 
 function getTerrainHeight(x, z) {
     const hill1 = Math.sin(x * 0.0025) * Math.cos(z * 0.0025) * 60;
@@ -737,7 +771,9 @@ const _hb = new THREE.BoxGeometry(4.5, 6, 12); _hb.translate(0, 9, 0);
 const _hh = new THREE.BoxGeometry(2, 5, 4); _hh.translate(0, 14, 5.5);
 const _hl1 = new THREE.BoxGeometry(1.5, 6, 1.5); _hl1.translate(-1.5, 3, 4);
 const _hl2 = new THREE.BoxGeometry(1.5, 6, 1.5); _hl2.translate(1.5, 3, 4);
-const sharedHorseGeometry = THREE.BufferGeometryUtils.mergeBufferGeometries([_hb, _hh, _hl1, _hl2]);
+const _hl3 = new THREE.BoxGeometry(1.5, 6, 1.5); _hl3.translate(-1.5, 3, -4);
+const _hl4 = new THREE.BoxGeometry(1.5, 6, 1.5); _hl4.translate(1.5, 3, -4);
+const sharedHorseGeometry = THREE.BufferGeometryUtils.mergeBufferGeometries([_hb, _hh, _hl1, _hl2, _hl3, _hl4]);
 const horseMaterial = new THREE.MeshLambertMaterial({ color: 0x333333 });
 
 // Floating name tag drawn to a canvas sprite (always faces the camera, drawn
@@ -1137,8 +1173,8 @@ function beginActivePhase() {
             document.getElementById('timer').innerText = `${m<10?'0':''}${m}:${s<10?'0':''}${s}`;
             // Host/solo seeds one lightning infection at each minute mark
             // (5:00, 4:00, 3:00, 2:00, 1:00 → elapsed 0/60/120/180/240).
-            // Spectators never seed.
-            if (GAME_MODE === 'solo' || (GAME_MODE === 'multi' && iAmHost)) {
+            // Only the 'lightning' ruleset uses this. Spectators never seed.
+            if (RULESET === 'lightning' && (GAME_MODE === 'solo' || (GAME_MODE === 'multi' && iAmHost))) {
                 while (strikesFired < 5 && elapsed >= strikesFired * 60) { lightningStrike(); strikesFired++; }
             }
             if (timeRemaining <= 0) checkWinCondition();
@@ -1147,21 +1183,34 @@ function beginActivePhase() {
 }
 
 function triggerFirstInfection() {
-    // No longer seeds infections directly — the infection now arrives as a
-    // lightning strike once per minute (see the match-timer loop). This just
-    // starts the active phase; the host syncs the shared clock.
+    // Fresh match start only (never called on a mid-match rejoin — that path
+    // goes through beginActivePhase() directly). Classic seeds its 2 initial
+    // infections silently here; lightning/openstorm seed nothing up front.
     beginActivePhase();
+    if (RULESET === 'classic' && (GAME_MODE === 'solo' || (GAME_MODE === 'multi' && iAmHost))) {
+        classicSeedInitialInfections();
+    }
     if (GAME_MODE === 'multi' && iAmHost && socket) socket.emit('begin_active');
 }
 
 // Pick a survivor for the next lightning strike. Weighted like real lightning:
 // the higher off the ground you are the more likely you are struck; sheltering
 // in a house lowers the odds. Host/solo only — the result is broadcast.
-function pickWeightedSurvivor() {
+// `exclude` (array of "bot:i" / "player:id" keys) lets a caller pick several
+// distinct survivors in one synchronous batch, before any network round-trip
+// would otherwise mark them infected.
+function pickWeightedSurvivor(exclude) {
+    const ex = exclude && exclude.length ? new Set(exclude) : null;
     const cands = [];
-    for (let i = 0; i < bots.length; i++) { const b = bots[i]; if (!b.isInfected && b.landed) cands.push({ type: 'bot', index: i, x: b.position.x, z: b.position.z, y: b.position.y }); }
-    if (!playerIsInfected && playerLanded) cands.push({ type: 'player', id: (GAME_MODE === 'multi' ? socket.id : 'me'), x: camera.position.x, z: camera.position.z, y: camera.position.y - 12 });
-    if (GAME_MODE === 'multi') Object.entries(mpPlayers).forEach(([id, p]) => { if (!p.isInfected && p.mesh && p.landed) cands.push({ type: 'player', id, x: p.mesh.position.x, z: p.mesh.position.z, y: p.mesh.position.y }); });
+    for (let i = 0; i < bots.length; i++) {
+        const b = bots[i];
+        if (!b.isInfected && b.landed && !(ex && ex.has(`bot:${i}`))) cands.push({ type: 'bot', index: i, x: b.position.x, z: b.position.z, y: b.position.y });
+    }
+    if (!playerIsInfected && playerLanded) {
+        const myId = GAME_MODE === 'multi' ? socket.id : 'me';
+        if (!(ex && ex.has(`player:${myId}`))) cands.push({ type: 'player', id: myId, x: camera.position.x, z: camera.position.z, y: camera.position.y - 12 });
+    }
+    if (GAME_MODE === 'multi') Object.entries(mpPlayers).forEach(([id, p]) => { if (!p.isInfected && p.mesh && p.landed && !(ex && ex.has(`player:${id}`))) cands.push({ type: 'player', id, x: p.mesh.position.x, z: p.mesh.position.z, y: p.mesh.position.y }); });
     if (cands.length === 0) return null;
     let total = 0;
     cands.forEach(c => {
@@ -1182,6 +1231,23 @@ function lightningStrike() {
         socket.emit('lightning', pick.type === 'bot' ? { bot: pick.index } : { player: pick.id });
     } else {
         applyLightning(pick.type === 'bot' ? [pick.index] : [], pick.type === 'player' ? [pick.id] : []);
+    }
+}
+
+// Classic ruleset: 2 distinct survivors turn infected the moment the match
+// goes active — picked from one batch so the same target can't be chosen
+// twice while a multiplayer round-trip is still in flight.
+function classicSeedInitialInfections() {
+    const exclude = [];
+    for (let n = 0; n < 2; n++) {
+        const pick = pickWeightedSurvivor(exclude);
+        if (!pick) break;
+        exclude.push(pick.type === 'bot' ? `bot:${pick.index}` : `player:${pick.id}`);
+        if (GAME_MODE === 'multi' && socket) {
+            socket.emit('lightning', pick.type === 'bot' ? { bot: pick.index } : { player: pick.id });
+        } else {
+            applyLightning(pick.type === 'bot' ? [pick.index] : [], pick.type === 'player' ? [pick.id] : []);
+        }
     }
 }
 
@@ -1280,6 +1346,19 @@ function applyStormPush(position, delta, isPlayer) {
     return pushed;
 }
 
+// Open-storm ruleset only: no wall — instead, straying past the safe-zone
+// edge risks a storm-lightning strike, odds climbing the further out you go.
+// 1%/sec right at the edge, +0.1%/sec per extra meter beyond it.
+function stormRiskChance(position) {
+    const dx = stormCenter.x - position.x, dz = stormCenter.z - position.z;
+    const beyond = Math.sqrt(dx * dx + dz * dz) - stormRadius;
+    return beyond > 0 ? 0.01 + 0.001 * beyond : 0;
+}
+function checkOpenStormRisk(position, delta) {
+    const chance = stormRiskChance(position);
+    return chance > 0 && Math.random() < chance * delta;
+}
+
 // ─── Horses ───────────────────────────────────────────────────────────────────
 function updateHorses(delta, time) {
     horses.forEach(horse => {
@@ -1305,7 +1384,7 @@ function updateHorses(delta, time) {
             const speed = 8 * delta;
             horse.position.x += horse.wanderDir.x * speed; horse.position.z += horse.wanderDir.z * speed;
             if (horse.wanderDir.lengthSq() > 0.1) horse.rotation.y = Math.atan2(horse.wanderDir.x, horse.wanderDir.z);
-            if (gamePhase === 'active') applyStormPush(horse.position, delta, false);
+            if (gamePhase === 'active' && RULESET !== 'openstorm') applyStormPush(horse.position, delta, false);
         }
         if (horse.rider !== 'player') {
             const currentFeetY = horse.position.y;
@@ -1392,11 +1471,61 @@ const blocker = document.getElementById('blocker');
 blocker.addEventListener('click', () => { initAudio(); if (!isVictory) controls.lock(); });
 controls.addEventListener('lock', () => { blocker.style.display = 'none'; });
 controls.addEventListener('unlock', () => {
-    if (!isVictory) blocker.style.display = 'flex';
+    if (!isVictory && !chatOpen) blocker.style.display = 'flex';
+});
+
+// ─── Chat ─────────────────────────────────────────────────────────────────────
+let chatOpen = false;
+const chatLog = document.getElementById('chat-log');
+const chatInputWrap = document.getElementById('chat-input-wrap');
+const chatInput = document.getElementById('chat-input');
+const chatHint = document.getElementById('chat-hint');
+if (!NET) chatHint.style.display = 'none';
+
+function escapeHtml(str) {
+    return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+function addChatLine(name, msg, color) {
+    const item = document.createElement('div');
+    item.className = 'chat-line';
+    item.innerHTML = name
+        ? `<span class="chat-name" style="color:${color || '#33ff33'}">${escapeHtml(name)}:</span> ${escapeHtml(msg)}`
+        : `<span style="color:${color || '#ff6666'}">${escapeHtml(msg)}</span>`;
+    chatLog.appendChild(item);
+    while (chatLog.children.length > 8) chatLog.removeChild(chatLog.firstChild);
+    setTimeout(() => { item.style.opacity = '0'; }, 8000);
+    setTimeout(() => { item.remove(); }, 8700);
+}
+function openChat() {
+    if (!NET || chatOpen || isVictory) return;
+    chatOpen = true;
+    Object.keys(keys).forEach(k => keys[k] = false); // don't leave movement stuck on
+    if (controls.isLocked) controls.unlock();
+    chatInputWrap.style.display = 'block';
+    chatInput.value = '';
+    chatInput.focus();
+}
+function closeChat(relock) {
+    chatOpen = false;
+    chatInputWrap.style.display = 'none';
+    chatInput.blur();
+    if (relock && !isVictory) controls.lock();
+}
+chatInput.addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    if (e.code === 'Enter') {
+        const msg = chatInput.value.trim();
+        if (msg && socket) socket.emit('chat_message', msg);
+        closeChat(true);
+    } else if (e.code === 'Escape') {
+        closeChat(true);
+    }
 });
 
 const keys = { w: false, a: false, s: false, d: false, space: false, shift: false };
 document.addEventListener('keydown', (e) => {
+    if (chatOpen) return;
+    if (e.code === 'Enter' && NET && !isVictory) { openChat(); return; }
     if (e.code === 'KeyW' || e.code === 'ArrowUp') keys.w = true;
     if (e.code === 'KeyA' || e.code === 'ArrowLeft') keys.a = true;
     if (e.code === 'KeyS' || e.code === 'ArrowDown') keys.s = true;
@@ -1780,7 +1909,17 @@ function updateBots(delta, time) {
         if (!bot.climbTower && (hitX || hitZ) && !bot.isJumping && Math.random() < 0.3) { bot.wanderDir.set((Math.random()-0.5)*2, 0, (Math.random()-0.5)*2).normalize(); bot.targetPos = bot.position.clone().add(bot.wanderDir.clone().multiplyScalar(40)); bot.velocityY = 60; bot.isJumping = true; }
         if (!bot.climbTower && !bot.isJumping && Math.random() < 0.005) { bot.velocityY = 40 + Math.random() * 20; bot.isJumping = true; }
         let isFloating = false;
-        if (gamePhase === 'active') { isFloating = applyStormPush(bot.position, delta, false); if (isFloating) { bot.isJumping = true; bot.velocityY = 0; } }
+        if (gamePhase === 'active') {
+            if (RULESET === 'openstorm') {
+                if (!bot.isInfected && bot.landed && checkOpenStormRisk(bot.position, delta)) {
+                    if (GAME_MODE === 'multi' && socket) socket.emit('storm_infect', { bot: botIdx });
+                    else applyLightning([botIdx], []);
+                }
+            } else {
+                isFloating = applyStormPush(bot.position, delta, false);
+                if (isFloating) { bot.isJumping = true; bot.velocityY = 0; }
+            }
+        }
         if (!isFloating) {
             if (bot.position.y > targetFloorY + 2) bot.isJumping = true;
             bot.velocityY -= 150 * delta; bot.position.y += bot.velocityY * delta;
@@ -1906,7 +2045,16 @@ function animate() {
             camera.position.x += dx; if (checkCollision(camera.position, 3, true)) camera.position.x -= dx;
             camera.position.z += dz; if (checkCollision(camera.position, 3, true)) camera.position.z -= dz;
             let isFloating = false;
-            if (gamePhase === 'active') isFloating = applyStormPush(camera.position, delta, true);
+            if (gamePhase === 'active') {
+                if (RULESET === 'openstorm') {
+                    if (!playerIsInfected && playerLanded && checkOpenStormRisk(camera.position, delta)) {
+                        if (GAME_MODE === 'multi' && socket) socket.emit('storm_infect', { player: socket.id });
+                        else applyLightning([], ['me']);
+                    }
+                } else {
+                    isFloating = applyStormPush(camera.position, delta, true);
+                }
+            }
             if (!isFloating) {
                 if (camera.position.y > targetFloorY + 2) isJumping = true;
                 if (keys.space && !isJumping) { playerVelocityY = 65; isJumping = true; sfxJump(); }
@@ -2007,6 +2155,13 @@ if (NET && socket) {
     socket.on('lightning', ({ bot, player }) => {
         applyLightning(typeof bot === 'number' ? [bot] : [], player != null ? [player] : []);
     });
+
+    socket.on('storm_infect', ({ bot, player }) => {
+        applyLightning(typeof bot === 'number' ? [bot] : [], player != null ? [player] : []);
+    });
+
+    socket.on('chat_message', ({ name, msg }) => { addChatLine(name || 'Player', msg); });
+    socket.on('chat_blocked', () => { addChatLine(null, 'Message blocked: contains inappropriate language.', '#ff6666'); });
 
     socket.on('infected', ({ targetId, byId, byName }) => {
         if (targetId === socket.id) {

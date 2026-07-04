@@ -47,6 +47,19 @@
   .big-btn .label { font-size: 22px; color: #fff; }
   .big-btn .desc { font-size: 13px; color: #777; margin-top: 6px; font-style: italic; }
 
+  /* --- Mode select --- */
+  #mode-select { display: none; width: 620px; max-width: 95vw; }
+  #mode-select h2 { font-size: 28px; color: #33ff33; margin-bottom: 16px; text-align: center; }
+  #mode-cards { display: flex; flex-direction: column; gap: 12px; margin-bottom: 20px; }
+  .mode-card {
+    background: rgba(255,255,255,0.05); border: 3px solid #444; border-radius: 10px;
+    padding: 16px 20px; cursor: pointer; transition: border-color 0.2s, background 0.2s;
+  }
+  .mode-card:hover { border-color: #77ff77; }
+  .mode-card.selected { border-color: #33ff33; background: rgba(51,255,51,0.1); }
+  .mode-name { font-size: 19px; color: #fff; margin-bottom: 4px; }
+  .mode-desc { font-size: 13px; color: #999; font-style: italic; }
+
   /* --- Room browser --- */
   #room-browser, #spectate-browser { display: none; width: 560px; max-width: 95vw; }
   #room-browser h2, #spectate-browser h2 { font-size: 28px; color: #33ff33; margin-bottom: 16px; }
@@ -139,6 +152,29 @@
     <span class="icon">👁️</span>
     <div class="label">SPECTATE</div>
     <div class="desc">Watch a live game</div>
+  </div>
+</div>
+
+<!-- Step 2b: Game mode select -->
+<div id="mode-select">
+  <h2>SELECT GAME MODE</h2>
+  <div id="mode-cards">
+    <div class="mode-card" data-mode="classic">
+      <div class="mode-name">CLASSIC</div>
+      <div class="mode-desc">2 survivors turn infected at the 5:00 mark. No lightning.</div>
+    </div>
+    <div class="mode-card selected" data-mode="lightning">
+      <div class="mode-name">LIGHTNING</div>
+      <div class="mode-desc">Every minute, lightning strikes a random survivor and infects them.</div>
+    </div>
+    <div class="mode-card" data-mode="openstorm">
+      <div class="mode-name">OPEN STORM</div>
+      <div class="mode-desc">The storm doesn't block you — but the further past its edge you stray, the more likely its lightning strikes and infects you.</div>
+    </div>
+  </div>
+  <div class="btn-row">
+    <button class="btn btn-green" id="mode-continue-btn">CONTINUE</button>
+    <button class="btn btn-gray" id="mode-back-btn">BACK</button>
   </div>
 </div>
 
@@ -240,14 +276,47 @@ let players = {}; // id → player data
 // --- Sections ---
 const nameSection = document.getElementById('name-section');
 const mainMenu = document.getElementById('main-menu');
+const modeSelect = document.getElementById('mode-select');
 const roomBrowser = document.getElementById('room-browser');
 const spectateBrowser = document.getElementById('spectate-browser');
 const pregameLobby = document.getElementById('pregame-lobby');
 
 function showOnly(el) {
-  [nameSection, mainMenu, roomBrowser, spectateBrowser, pregameLobby].forEach(e => e.style.display = 'none');
+  [nameSection, mainMenu, modeSelect, roomBrowser, spectateBrowser, pregameLobby].forEach(e => e.style.display = 'none');
   el.style.display = el === mainMenu ? 'flex' : 'block';
 }
+
+// --- Game mode select (shown before solo starts / before hosting a room) ---
+let pendingAction = null; // 'solo' | 'host'
+let selectedRuleset = 'lightning';
+
+document.querySelectorAll('.mode-card').forEach(card => {
+  card.addEventListener('click', () => {
+    document.querySelectorAll('.mode-card').forEach(c => c.classList.remove('selected'));
+    card.classList.add('selected');
+    selectedRuleset = card.dataset.mode;
+  });
+});
+
+document.getElementById('mode-back-btn').addEventListener('click', () => {
+  showOnly(pendingAction === 'solo' ? mainMenu : roomBrowser);
+});
+
+document.getElementById('mode-continue-btn').addEventListener('click', () => {
+  if (pendingAction === 'solo') {
+    window.location.href = `/login/game.php?g=multiinfectgame&mode=solo&ruleset=${selectedRuleset}`;
+  } else if (pendingAction === 'host') {
+    const roomName = myName + "'s Game";
+    socket.emit('create_room', roomName, selectedRuleset, (res) => {
+      if (!res.ok) return alert(res.error);
+      myRoomId = res.roomId;
+      myHostId = socket.id;
+      players = {};
+      players[socket.id] = { id: socket.id, name: myName, isHost: true, ready: false };
+      enterLobby(roomName, res.roomId);
+    });
+  }
+});
 
 // --- Name ---
 document.getElementById('name-input').addEventListener('keydown', e => {
@@ -265,7 +334,8 @@ function confirmName() {
 
 // --- Main menu ---
 document.getElementById('solo-btn').addEventListener('click', () => {
-  window.location.href = '/login/game.php?g=multiinfectgame&mode=solo';
+  pendingAction = 'solo';
+  showOnly(modeSelect);
 });
 
 document.getElementById('mp-btn').addEventListener('click', () => {
@@ -306,15 +376,8 @@ socket.on('active_room_list', (list) => {
 });
 
 document.getElementById('host-btn').addEventListener('click', () => {
-  const roomName = myName + "'s Game";
-  socket.emit('create_room', roomName, (res) => {
-    if (!res.ok) return alert(res.error);
-    myRoomId = res.roomId;
-    myHostId = socket.id;
-    players = {};
-    players[socket.id] = { id: socket.id, name: myName, isHost: true, ready: false };
-    enterLobby(roomName, res.roomId);
-  });
+  pendingAction = 'host';
+  showOnly(modeSelect);
 });
 
 socket.on('room_list', (list) => {
@@ -434,8 +497,8 @@ socket.on('new_host', ({ id }) => {
   renderPlayerList();
 });
 
-socket.on('game_start', () => {
-  window.location.href = `/login/game.php?g=multiinfectgame&mode=multi&room=${myRoomId}&name=${encodeURIComponent(myName)}`;
+socket.on('game_start', ({ ruleset } = {}) => {
+  window.location.href = `/login/game.php?g=multiinfectgame&mode=multi&room=${myRoomId}&name=${encodeURIComponent(myName)}&ruleset=${ruleset || 'lightning'}`;
 });
 
 // Refresh room list periodically while browsing

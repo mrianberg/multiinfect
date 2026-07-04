@@ -36,6 +36,25 @@ function cleanStr(s, max) {
     return String(s == null ? '' : s).slice(0, max).replace(/[<>]/g, '');
 }
 
+// ─── Chat profanity filter ─────────────────────────────────────────────────
+// Blocks a message outright (never broadcasts it) if it contains any listed
+// word. Text is lowercased, common leetspeak substitutions are decoded, and
+// all non-letters (including spaces) are stripped before matching, so basic
+// obfuscation like "f.u.c.k" or "5hit" still gets caught.
+const BAD_WORD_LIST = [
+    'fuck', 'shit', 'bitch', 'asshole', 'bastard', 'cunt', 'dick', 'pussy', 'whore', 'slut',
+    'nigger', 'nigga', 'faggot', 'chink', 'spic', 'kike', 'retard', 'tranny', 'coon',
+    'cock', 'twat', 'wanker', 'douchebag', 'motherfucker', 'dumbass', 'jackass', 'rape', 'piss',
+];
+const LEET_SUBS = { '0': 'o', '1': 'i', '3': 'e', '4': 'a', '5': 's', '7': 't', '8': 'b', '@': 'a', '$': 's', '!': 'i' };
+function normalizeForFilter(s) {
+    return String(s).toLowerCase().replace(/[0134578@$!]/g, c => LEET_SUBS[c] || c).replace(/[^a-z]/g, '');
+}
+function containsBadWord(text) {
+    const norm = normalizeForFilter(text);
+    return BAD_WORD_LIST.some(w => norm.includes(w));
+}
+
 function getRoomList() {
     const list = [];
     for (const [id, room] of rooms) {
@@ -66,6 +85,11 @@ function getActiveRoomList() {
         }
     }
     return list;
+}
+
+const VALID_RULESETS = new Set(['classic', 'lightning', 'openstorm']);
+function cleanRuleset(r) {
+    return VALID_RULESETS.has(r) ? r : 'lightning';
 }
 
 function makePlayer(socket, isHost) {
@@ -146,7 +170,7 @@ io.on('connection', (socket) => {
         });
     });
 
-    socket.on('create_room', (roomName, callback) => {
+    socket.on('create_room', (roomName, ruleset, callback) => {
         if (typeof callback !== 'function') return;
         if (rooms.size >= MAX_ROOMS) return callback({ ok: false, error: 'Server is full, try again later' });
         leaveCurrentRoom(); // never hold membership in two rooms at once
@@ -160,6 +184,7 @@ io.on('connection', (socket) => {
             players: new Map(),
             state: 'lobby', // 'lobby' | 'ingame'
             seed: (Math.random() * 4294967296) >>> 0, // shared world-generation seed
+            ruleset: cleanRuleset(ruleset), // 'classic' | 'lightning' | 'openstorm'
             emptySince: null,
             botsInfected: new Set(),
             infectedPlayers: new Set(),
@@ -233,7 +258,7 @@ io.on('connection', (socket) => {
         room.matchPlayerCount = room.players.size;
         room.activeAt = 0;
         broadcastRoomList();
-        io.to(socket.roomId).emit('game_start');
+        io.to(socket.roomId).emit('game_start', { ruleset: room.ruleset });
     });
 
     // Host marks the active phase start; sets the authoritative match clock.
@@ -259,6 +284,41 @@ io.on('connection', (socket) => {
             if (p && !p.isInfected) { p.isInfected = true; room.infectedPlayers.add(data.player); out.player = data.player; }
         }
         if (out.bot !== undefined || out.player !== undefined) io.to(socket.roomId).emit('lightning', out);
+    });
+
+    // Open-storm ruleset: continuous per-second infection risk for anyone past
+    // the shrinking safe-zone edge. Unlike the scheduled 'lightning' strikes,
+    // any client can report a bot it owns (bots are simulated per-client, so
+    // only the owner knows a bot's true position); a player may only report
+    // themselves, never another player.
+    socket.on('storm_infect', (data) => {
+        const room = rooms.get(socket.roomId);
+        if (!room || room.state !== 'ingame') return;
+        if (!data || typeof data !== 'object') return;
+        const out = {};
+        if (Number.isInteger(data.bot) && data.bot >= 0 && data.bot < MAX_MATCH_ENTITIES) {
+            if (!room.botsInfected.has(data.bot)) { room.botsInfected.add(data.bot); out.bot = data.bot; }
+        }
+        if (data.player === socket.id && room.players.has(data.player)) {
+            const p = room.players.get(data.player);
+            if (p && !p.isInfected) { p.isInfected = true; room.infectedPlayers.add(data.player); out.player = data.player; }
+        }
+        if (out.bot !== undefined || out.player !== undefined) io.to(socket.roomId).emit('storm_infect', out);
+    });
+
+    // In-game chat. Messages containing any filtered word are dropped
+    // entirely (never broadcast) rather than censored, per spec.
+    socket.on('chat_message', (msg) => {
+        const roomId = socket.roomId || socket.spectatingRoom;
+        const room = rooms.get(roomId);
+        if (!room || typeof msg !== 'string') return;
+        const now = Date.now();
+        if (socket.lastChatAt && now - socket.lastChatAt < 400) return; // basic flood guard
+        socket.lastChatAt = now;
+        const trimmed = cleanStr(msg, 140).trim();
+        if (!trimmed) return;
+        if (containsBadWord(trimmed)) { socket.emit('chat_blocked'); return; }
+        io.to(roomId).emit('chat_message', { name: cleanStr(socket.playerName, 20) || 'Player', msg: trimmed });
     });
 
     // Per-frame position update — thin relay, clients handle physics locally
