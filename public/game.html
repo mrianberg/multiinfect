@@ -368,11 +368,29 @@ function hiTension(t, gain) { // brief dissonant high shimmer (very high intensi
     [880, 932].forEach(fr => { const o = audioCtx.createOscillator(); o.type = 'sawtooth'; o.frequency.value = fr; o.connect(f); o.start(t); o.stop(t + 1.0); });
     f.connect(g); g.connect(musicGain); revSend(g, 0.6);
 }
+// Bright, short plucky tone for the playful pre-infection melody (no dread
+// detuning — a clean triangle + a soft octave-up sine for a little sparkle).
+function happyPluck(freq, t, gain) {
+    const g = audioCtx.createGain();
+    g.gain.setValueAtTime(0.0001, t); g.gain.linearRampToValueAtTime(gain, t + 0.008); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.55);
+    const o = audioCtx.createOscillator(); o.type = 'triangle'; o.frequency.value = freq;
+    const o2 = audioCtx.createOscillator(); o2.type = 'sine'; o2.frequency.value = freq * 2;
+    const og2 = audioCtx.createGain(); og2.gain.value = 0.25;
+    o.connect(g); o2.connect(og2); og2.connect(g);
+    o.start(t); o.stop(t + 0.6); o2.start(t); o2.stop(t + 0.6);
+    g.connect(musicGain); revSend(g, 0.3);
+}
+function pluckBass(t, gain) { // light, bouncy bass pop for the happy cue
+    const o = audioCtx.createOscillator(); o.type = 'triangle'; o.frequency.value = 98; // G2
+    const g = audioCtx.createGain(); g.gain.setValueAtTime(0.0001, t); g.gain.linearRampToValueAtTime(gain, t + 0.01); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.18);
+    o.connect(g); g.connect(musicGain); o.start(t); o.stop(t + 0.2);
+}
 
 // ── atmospheric, beat-based scheduler. A Phrygian (A Bb C D E F G) for dread;
 // slow heartbeat + sparse dissonant motifs, tightening in the active phase ──
 const PHRYG = [45, 46, 48, 50, 52, 53, 55]; // A2 Bb2 C3 D3 E3 F3 G3
 const TENSION_NOTES = [46, 53, 58, 60, 65]; // Bb, F, Bb(oct), C, F — the uneasy ones
+const HAPPY_NOTES = [60, 62, 64, 67, 69, 72, 74, 76]; // C D E G A c d e — bright C major pentatonic, two octaves
 // intensity (0..1) climbs mainly with the share of the field infected, and a
 // little with match time — so the score winds tighter and faster the more the
 // virus spreads.
@@ -383,18 +401,42 @@ function musicIntensity() {
     const tprog = Math.min(1, elapsed / 300);
     return Math.min(1, 0.2 + 0.8 * Math.min(1, 0.9 * frac + 0.3 * tprog));
 }
+// Bright, upbeat cue for the drop/countdown/pre-infection window — bouncy
+// major-pentatonic plucks, no heartbeat, no dissonance. Shares the same
+// nextNoteTime/musicBeat transport as the dread cue below so the handoff at
+// the first infection lands on a beat instead of cutting abruptly.
+function scheduleHappyMusic() {
+    const bpm = 112, beatDur = 60 / bpm;
+    if (droneGain) droneGain.gain.setTargetAtTime(0.05, audioCtx.currentTime, 1.5); // barely-there — let the plucks carry it
+    if (droneFilter) droneFilter.Q.value = 2;
+    while (nextNoteTime < audioCtx.currentTime + 0.35) {
+        const beat = musicBeat, t = nextNoteTime;
+        pluckBass(t, 0.22); // bouncy bass on every beat
+        if (Math.random() < 0.75) { // skipping melodic pluck, mostly on the "and" so it feels playful, not metronomic
+            const m = HAPPY_NOTES[Math.floor(Math.random() * HAPPY_NOTES.length)];
+            const off = Math.random() < 0.5 ? beatDur * 0.5 : 0;
+            happyPluck(midiFreq(m), t + off, 0.16);
+        }
+        if (beat % 4 === 0 && Math.random() < 0.6) { // bright little arpeggio flourish every 4 beats
+            [2, 4, 6].forEach((k, idx) => happyPluck(midiFreq(HAPPY_NOTES[k]), t + idx * beatDur * 0.22, 0.1));
+        }
+        nextNoteTime += beatDur;
+        musicBeat = (musicBeat + 1) % 64;
+    }
+}
 function scheduleMusic() {
     if (!audioReady || audioMuted) return;
-    // Stay in the calm ambient branch until the first infection actually lands,
-    // even once the match clock/storm has started — the dread ramp is a
-    // reaction to the virus spreading, not to the timer running.
+    // Stay on the happy cue until the first infection actually lands, even
+    // once the match clock/storm has started — the dread ramp is a reaction
+    // to the virus spreading, not to the timer running.
     const active = gamePhase === 'active' && survivorsLeft < matchTotalEntities;
-    const I = musicIntensity(); // 0 pre-infection, 0.2 → 1.0 as it spreads
+    if (!active) { scheduleHappyMusic(); return; }
+    const I = musicIntensity(); // 0.2 → 1.0 as it spreads
     // drone opens up, brightens and thickens with intensity
-    if (droneGain) droneGain.gain.setTargetAtTime(active ? 0.16 + 0.16 * I : 0.16, audioCtx.currentTime, 1.5);
+    if (droneGain) droneGain.gain.setTargetAtTime(0.16 + 0.16 * I, audioCtx.currentTime, 1.5);
     if (droneFilter) droneFilter.Q.value = 3 + 7 * I;
     // tempo ramps from a slow dread pulse up to a frantic one
-    const bpm = active ? (84 + 62 * I) : 66;
+    const bpm = 84 + 62 * I;
     const beatDur = 60 / bpm;
     while (nextNoteTime < audioCtx.currentTime + 0.35) {
         const beat = musicBeat, t = nextNoteTime;
@@ -404,7 +446,7 @@ function scheduleMusic() {
         // dissonant bell motifs — denser with intensity, quantised to the beat
         // grid (on the beat, or cleanly on the "and") so they lock to the pulse
         // instead of floating with a random offset.
-        if (Math.random() < (active ? 0.2 + 0.4 * I : 0.22)) {
+        if (Math.random() < 0.2 + 0.4 * I) {
             const pool = Math.random() < 0.5 + 0.3 * I ? TENSION_NOTES : PHRYG;
             const m = pool[Math.floor(Math.random() * pool.length)] + (Math.random() < 0.3 ? 12 : 0);
             const off = Math.random() < 0.35 ? beatDur * 0.5 : 0; // on-beat or the "and"
@@ -413,15 +455,15 @@ function scheduleMusic() {
         // dissonant pad swell every 8 beats, thicker with intensity
         if (beat % 8 === 0) padSwell([33, 34, 40], t, 0.09 + 0.1 * I, beatDur * 8);
         // low tension pulse: off-beats when active, then every beat once it's heavy
-        if (active && (beat % 2 === 1 || I > 0.55)) subPulse(t, 0.2 + 0.22 * I);
+        if (beat % 2 === 1 || I > 0.55) subPulse(t, 0.2 + 0.22 * I);
         // driving 16th-note ticks fade in past the halfway mark of intensity
-        if (active && I > 0.45) {
+        if (I > 0.45) {
             const tg = 0.05 + 0.12 * I;
             tick(t, tg); tick(t + beatDur * 0.5, tg * 0.8);
             if (I > 0.75) { tick(t + beatDur * 0.25, tg * 0.6); tick(t + beatDur * 0.75, tg * 0.6); }
         }
         // high dissonant shimmer near the climax
-        if (active && I > 0.8 && beat % 4 === 0) hiTension(t, 0.05);
+        if (I > 0.8 && beat % 4 === 0) hiTension(t, 0.05);
         nextNoteTime += beatDur;
         musicBeat = (musicBeat + 1) % 64;
     }
@@ -640,10 +682,123 @@ function updateLightnings(delta) {
 let suppressStrikeVFX = false; // true while applying a join snapshot (avoid a flash storm)
 function strikeLightning(x, z) { if (suppressStrikeVFX || RULESET === 'classic') return; spawnLightning(x, z); sfxThunder(); }
 
-function getTerrainHeight(x, z) {
+function hillHeight(x, z) {
     const hill1 = Math.sin(x * 0.0025) * Math.cos(z * 0.0025) * 60;
     const hill2 = Math.sin(x * 0.0075) * Math.cos(z * 0.0075) * 20;
     return hill1 + hill2;
+}
+
+// ─── Lakes & rivers ─────────────────────────────────────────────────────────
+// Seeded so every client generates an identical layout. Terrain (and safe
+// placement/spawn checks) factor these in via getTerrainHeight/checkEnvCollision
+// below; the visible animated water surfaces are built in the "Filling Lakes
+// & Rivers" load task, before the terrain mesh task runs.
+const SHORE_BAND = 200;  // terrain eases from normal ground down to the lakebed over this many units
+const SHORE_MARGIN = 30; // keep placed structures/spawns at least this far past the shoreline
+const lakes = [];  // { x, z, radius, level }
+const rivers = []; // { points: [{x,z,level}, ...], width } — points chain shoreline-to-shoreline
+
+// Every water body's floor sits this far below its own surface — a single
+// shared offset, so (level, bed) is continuous wherever a lake meets its
+// river (they share an exact level at that point) and nothing creases.
+const WATER_BED_OFFSET = 20;
+
+// Closest point + interpolated level on a single river leg (one pair of
+// consecutive polyline points).
+function legInfluence(x, z, a, b, width) {
+    const dx = b.x - a.x, dz = b.z - a.z;
+    const lenSq = dx * dx + dz * dz;
+    let t = lenSq > 0 ? ((x - a.x) * dx + (z - a.z) * dz) / lenSq : 0;
+    t = Math.max(0, Math.min(1, t));
+    const d = Math.hypot(x - (a.x + t * dx), z - (a.z + t * dz));
+    return { inside: width / 2 - d, level: a.level + (b.level - a.level) * t };
+}
+// Runs callback(inside, level) once per lake and once per individual river
+// leg — every water primitive treated as its own independent shape, rather
+// than pre-resolving "nearest leg" per river (see terrainWaterBlend for why).
+function forEachWaterPrimitive(x, z, callback) {
+    for (let i = 0; i < lakes.length; i++) { const l = lakes[i]; callback(l.radius - Math.hypot(x - l.x, z - l.z), l.level); }
+    for (let i = 0; i < rivers.length; i++) {
+        const r = rivers[i];
+        for (let j = 0; j < r.points.length - 1; j++) { const li = legInfluence(x, z, r.points[j], r.points[j + 1], r.width); callback(li.inside, li.level); }
+    }
+}
+
+// How far "inside" the nearest water primitive this point is (positive =
+// inside, growing toward the interior; negative = out on dry land). Only used
+// for the boolean "is this spot too close to water" placement check — a wrong
+// pick between two nearby primitives there is harmless, unlike the carve below.
+function nearestWaterInfluence(x, z) {
+    let inside = -Infinity;
+    forEachWaterPrimitive(x, z, (v) => { if (v > inside) inside = v; });
+    return { inside };
+}
+
+// Terrain carving needs actual continuity, which resolving a single "nearest
+// primitive" per point can't guarantee: two different lakes/river legs can be
+// equally "nearest" at some point while each wanting a different level (e.g.
+// right where a river leg meets the next leg, or meets its lake). Blending
+// every primitive's contribution by its own (continuous) eased weight is
+// continuous everywhere by construction instead — no primitive ever "wins"
+// outright, so there's nothing to jump between.
+function terrainWaterBlend(x, z) {
+    let totalWeight = 0, weightedBed = 0;
+    forEachWaterPrimitive(x, z, (inside, level) => {
+        if (inside <= -SHORE_BAND) return;
+        const k = Math.max(0, Math.min(1, (inside + SHORE_BAND) / SHORE_BAND));
+        const eased = k * k * (3 - 2 * k);
+        totalWeight += eased; weightedBed += eased * (level - WATER_BED_OFFSET);
+    });
+    if (totalWeight <= 0) return null;
+    return { eased: Math.min(1, totalWeight), bed: weightedBed / totalWeight };
+}
+
+// Picks 2 lake sites and a gently meandering river connecting them. Must run
+// (via the load task) before anything calls getTerrainHeight/checkEnvCollision
+// for real, since both factor the result in.
+function generateWaterBodies() {
+    for (let i = 0; i < 2; i++) {
+        let attempts = 0;
+        while (attempts < 60) {
+            const x = (wrand() - 0.5) * 2600, z = (wrand() - 0.5) * 2600;
+            const radius = 150 + wrand() * 90;
+            const tooClose = lakes.some(l => Math.hypot(x - l.x, z - l.z) < l.radius + radius + 500);
+            if (!tooClose) { lakes.push({ x, z, radius, level: hillHeight(x, z) - 4 }); break; } // natural ground height here, before any water exists
+            attempts++;
+        }
+    }
+    if (lakes.length === 2) {
+        const [A, B] = lakes;
+        const dx = B.x - A.x, dz = B.z - A.z, dist = Math.hypot(dx, dz) || 1;
+        const ux = dx / dist, uz = dz / dist; // unit vector A → B
+        const nx = -uz, nz = ux; // perpendicular, for a sideways wobble
+        // River runs shoreline-to-shoreline (not center-to-center) so it visibly
+        // emerges from each lake's edge instead of cutting through its middle.
+        const startX = A.x + ux * A.radius, startZ = A.z + uz * A.radius;
+        const endX = B.x - ux * B.radius, endZ = B.z - uz * B.radius;
+        const segDx = endX - startX, segDz = endZ - startZ;
+        const N = 4, points = [];
+        // Wobble is capped relative to each leg's own length purely so the
+        // path meanders without visually folding back on itself — the terrain
+        // carve above stays continuous regardless, since it blends every leg's
+        // contribution instead of picking a single "nearest" one.
+        const legLen = Math.hypot(segDx, segDz) / N;
+        const maxWobble = Math.min(240, legLen * 0.5);
+        for (let i = 0; i <= N; i++) {
+            const t = i / N;
+            const wobble = (i === 0 || i === N) ? 0 : (wrand() - 0.5) * 2 * maxWobble;
+            points.push({ x: startX + segDx * t + nx * wobble, z: startZ + segDz * t + nz * wobble, level: A.level + (B.level - A.level) * t });
+        }
+        rivers.push({ points, width: 46 });
+    }
+}
+
+function getTerrainHeight(x, z) {
+    const h = hillHeight(x, z);
+    if (lakes.length === 0 && rivers.length === 0) return h;
+    const blend = terrainWaterBlend(x, z);
+    if (!blend) return h;
+    return h * (1 - blend.eased) + blend.bed * blend.eased;
 }
 
 function getTerrainNormal(x, z) {
@@ -699,6 +854,7 @@ function getFloorHeight(x, z, currentFeetY, radius = 3) {
 }
 
 function checkEnvCollision(x, z, radius) {
+    if (nearestWaterInfluence(x, z).inside > -(SHORE_MARGIN + radius)) return true; // keep spawns/structures off the water
     _tempMinVec.set(x - radius, -50, z - radius); _tempMaxVec.set(x + radius, 100, z + radius);
     _tempColBox.set(_tempMinVec, _tempMaxVec);
     for (let i = 0; i < globalColliders.length; i++) {
@@ -938,6 +1094,88 @@ function spawnTallTower(cx, cz) {
 // ─── Loading queue ────────────────────────────────────────────────────────────
 const loadingQueue = []; let totalTasks = 0; let completedTasks = 0;
 function addTask(name, func) { loadingQueue.push({ name, func }); totalTasks++; }
+
+// Animated water — one small shared shader, cloned per lake/river with its
+// own uniforms. Local-space x/z drives the wave phase (each mesh is built
+// centred on its own footprint), and y is displaced by that wave in the
+// vertex shader — same "geometry pre-rotated flat, then offset in Y" trick
+// the terrain plane uses.
+const waterVertexShader = `
+uniform float uTime;
+varying vec2 vXZ;
+varying float vWave;
+void main() {
+    vXZ = position.xz;
+    float wave = sin(position.x * 0.05 + uTime * 1.6) * 1.3
+               + sin(position.z * 0.07 - uTime * 1.1) * 0.9
+               + sin((position.x + position.z) * 0.035 + uTime * 0.8) * 0.7;
+    vWave = wave;
+    vec3 displaced = position + vec3(0.0, wave, 0.0);
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(displaced, 1.0);
+}`;
+const waterFragmentShader = `
+uniform float uRadius;
+uniform float uIsCircular;
+uniform float uNightMix;
+uniform vec3 uDeepColor;
+uniform vec3 uShallowColor;
+uniform vec3 uDeepColorNight;
+uniform vec3 uShallowColorNight;
+varying vec2 vXZ;
+varying float vWave;
+void main() {
+    float edge = 1.0;
+    if (uIsCircular > 0.5) {
+        float d = length(vXZ);
+        edge = 1.0 - smoothstep(uRadius - 18.0, uRadius, d);
+        if (edge <= 0.01) discard;
+    }
+    float t = clamp(vWave * 0.12 + 0.5, 0.0, 1.0);
+    vec3 dayColor = mix(uDeepColor, uShallowColor, t);
+    vec3 nightColor = mix(uDeepColorNight, uShallowColorNight, t);
+    gl_FragColor = vec4(mix(dayColor, nightColor, uNightMix), 0.82 * edge);
+}`;
+const waterMaterials = []; // uTime/uNightMix refreshed once per frame in animate()
+function makeWaterMaterial(isCircular, radius) {
+    const mat = new THREE.ShaderMaterial({
+        transparent: true, depthWrite: false, side: THREE.DoubleSide,
+        uniforms: {
+            uTime: { value: 0 }, uRadius: { value: radius || 0 }, uIsCircular: { value: isCircular ? 1 : 0 },
+            uNightMix: { value: 0 },
+            uDeepColor: { value: new THREE.Color(0x1c5f7a) }, uShallowColor: { value: new THREE.Color(0x4fb0c9) },
+            uDeepColorNight: { value: new THREE.Color(0x061826) }, uShallowColorNight: { value: new THREE.Color(0x123246) },
+        },
+        vertexShader: waterVertexShader, fragmentShader: waterFragmentShader,
+    });
+    waterMaterials.push(mat);
+    return mat;
+}
+function buildLakeMesh(lake) {
+    const size = lake.radius * 2 + 50;
+    const geo = new THREE.PlaneGeometry(size, size, 24, 24); geo.rotateX(-Math.PI / 2);
+    const mesh = new THREE.Mesh(geo, makeWaterMaterial(true, lake.radius));
+    mesh.position.set(lake.x, lake.level, lake.z);
+    scene.add(mesh);
+}
+function buildRiverMesh(river) {
+    // One quad per leg of the polyline — each leg's own two endpoint levels
+    // (not a global average) so the visible surface matches the continuous
+    // carve exactly at every joint.
+    for (let i = 0; i < river.points.length - 1; i++) {
+        const p0 = river.points[i], p1 = river.points[i + 1];
+        const dx = p1.x - p0.x, dz = p1.z - p0.z, len = Math.hypot(dx, dz) || 1;
+        const geo = new THREE.PlaneGeometry(river.width, len, 2, Math.max(2, Math.round(len / 40))); geo.rotateX(-Math.PI / 2);
+        const mesh = new THREE.Mesh(geo, makeWaterMaterial(false, 0));
+        mesh.position.set((p0.x + p1.x) / 2, (p0.level + p1.level) / 2, (p0.z + p1.z) / 2);
+        mesh.rotation.y = Math.atan2(dx, dz);
+        scene.add(mesh);
+    }
+}
+addTask("Filling Lakes & Rivers", () => {
+    generateWaterBodies();
+    lakes.forEach(buildLakeMesh);
+    rivers.forEach(buildRiverMesh);
+});
 
 addTask("Sculpting Massive Terrain", () => {
     const floorGeo = new THREE.PlaneGeometry(7000, 7000, 200, 200); floorGeo.rotateX(-Math.PI / 2);
@@ -1963,6 +2201,14 @@ const BOT_SEND_INTERVAL = 100; // ms (10 updates/sec, interpolated on receivers)
 function animate() {
     requestAnimationFrame(animate);
     const time = performance.now(); const rawDelta = (time - prevTime) / 1000; const delta = Math.min(rawDelta, 0.1);
+
+    if (waterMaterials.length) {
+        const wt = time / 1000;
+        for (let i = 0; i < waterMaterials.length; i++) {
+            waterMaterials[i].uniforms.uTime.value = wt;
+            waterMaterials[i].uniforms.uNightMix.value = nightFadeProgress;
+        }
+    }
 
     if (gamePhase === 'active' && nightFadeProgress < 1) {
         nightFadeProgress += delta * 0.2;
