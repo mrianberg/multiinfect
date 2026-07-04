@@ -693,15 +693,27 @@ function hillHeight(x, z) {
 // placement/spawn checks) factor these in via getTerrainHeight/checkEnvCollision
 // below; the visible animated water surfaces are built in the "Filling Lakes
 // & Rivers" load task, before the terrain mesh task runs.
-const SHORE_BAND = 200;  // terrain eases from normal ground down to the lakebed over this many units
-const SHORE_MARGIN = 30; // keep placed structures/spawns at least this far past the shoreline
-const lakes = [];  // { x, z, radius, level }
-const rivers = []; // { points: [{x,z,level}, ...], width } — points chain shoreline-to-shoreline
+const SHORE_MARGIN = 30; // keep placed structures/spawns this far past the waterline
 
-// Every water body's floor sits this far below its own surface — a single
-// shared offset, so (level, bed) is continuous wherever a lake meets its
-// river (they share an exact level at that point) and nothing creases.
-const WATER_BED_OFFSET = 20;
+// Water bodies. Lakes & ponds are irregular blobs — a base radius modulated by
+// a few angular harmonics, so they're never perfect circles — and the river is
+// a meandering polyline. Each carries its own shore width and depth, so a small
+// pond gets a tight bank and shallow bed while a big lake gets a broad one.
+const lakes = [];  // { x, z, radius, level, shape, shore, depth }
+const rivers = []; // { points: [{x,z,level}], width, shore, depth }
+
+// r(θ) as a fraction of the base radius — 1 plus a few sine lobes. Clamped
+// above 0 so the outline never pinches through the centre.
+function shapeFactor(shape, ang) {
+    let f = 1;
+    for (let i = 0; i < shape.length; i++) f += shape[i].amp * Math.sin(shape[i].k * ang + shape[i].phase);
+    return Math.max(0.45, f);
+}
+function makeShape() {
+    const s = []; const n = 2 + Math.floor(wrand() * 2); // 2–3 harmonics
+    for (let i = 0; i < n; i++) s.push({ k: 2 + Math.floor(wrand() * 4), amp: 0.08 + wrand() * 0.13, phase: wrand() * Math.PI * 2 });
+    return s;
+}
 
 // Closest point + interpolated level on a single river leg (one pair of
 // consecutive polyline points).
@@ -713,84 +725,85 @@ function legInfluence(x, z, a, b, width) {
     const d = Math.hypot(x - (a.x + t * dx), z - (a.z + t * dz));
     return { inside: width / 2 - d, level: a.level + (b.level - a.level) * t };
 }
-// Runs callback(inside, level) once per lake and once per individual river
+// Runs cb(inside, level, shore, depth) once per lake/pond and once per river
 // leg — every water primitive treated as its own independent shape, rather
-// than pre-resolving "nearest leg" per river (see terrainWaterBlend for why).
-function forEachWaterPrimitive(x, z, callback) {
-    for (let i = 0; i < lakes.length; i++) { const l = lakes[i]; callback(l.radius - Math.hypot(x - l.x, z - l.z), l.level); }
+// than pre-resolving "nearest" (see terrainWaterBlend for why).
+function forEachWaterPrimitive(x, z, cb) {
+    for (let i = 0; i < lakes.length; i++) {
+        const l = lakes[i], dxp = x - l.x, dzp = z - l.z;
+        const er = l.radius * shapeFactor(l.shape, Math.atan2(dzp, dxp));
+        cb(er - Math.hypot(dxp, dzp), l.level, l.shore, l.depth);
+    }
     for (let i = 0; i < rivers.length; i++) {
         const r = rivers[i];
-        for (let j = 0; j < r.points.length - 1; j++) { const li = legInfluence(x, z, r.points[j], r.points[j + 1], r.width); callback(li.inside, li.level); }
+        for (let j = 0; j < r.points.length - 1; j++) { const li = legInfluence(x, z, r.points[j], r.points[j + 1], r.width); cb(li.inside, li.level, r.shore, r.depth); }
     }
-}
-
-// How far "inside" the nearest water primitive this point is (positive =
-// inside, growing toward the interior; negative = out on dry land). Only used
-// for the boolean "is this spot too close to water" placement check — a wrong
-// pick between two nearby primitives there is harmless, unlike the carve below.
-function nearestWaterInfluence(x, z) {
-    let inside = -Infinity;
-    forEachWaterPrimitive(x, z, (v) => { if (v > inside) inside = v; });
-    return { inside };
 }
 
 // Terrain carving needs actual continuity, which resolving a single "nearest
-// primitive" per point can't guarantee: two different lakes/river legs can be
-// equally "nearest" at some point while each wanting a different level (e.g.
-// right where a river leg meets the next leg, or meets its lake). Blending
-// every primitive's contribution by its own (continuous) eased weight is
-// continuous everywhere by construction instead — no primitive ever "wins"
-// outright, so there's nothing to jump between.
+// primitive" per point can't guarantee: two bodies can be equally "nearest" at
+// a point while each wanting a different level (e.g. where a river leg meets
+// the next, or meets its lake). Blending every primitive's contribution by its
+// own (continuous) eased weight is continuous everywhere by construction — no
+// primitive ever "wins" outright, so there's nothing to jump between. Returns
+// the carved bed height and the water-surface level, or null far from water.
 function terrainWaterBlend(x, z) {
-    let totalWeight = 0, weightedBed = 0;
-    forEachWaterPrimitive(x, z, (inside, level) => {
-        if (inside <= -SHORE_BAND) return;
-        const k = Math.max(0, Math.min(1, (inside + SHORE_BAND) / SHORE_BAND));
+    let w = 0, wbed = 0, wlev = 0;
+    forEachWaterPrimitive(x, z, (inside, level, shore, depth) => {
+        if (inside <= -shore) return;
+        const k = Math.max(0, Math.min(1, (inside + shore) / shore));
         const eased = k * k * (3 - 2 * k);
-        totalWeight += eased; weightedBed += eased * (level - WATER_BED_OFFSET);
+        w += eased; wbed += eased * (level - depth); wlev += eased * level;
     });
-    if (totalWeight <= 0) return null;
-    return { eased: Math.min(1, totalWeight), bed: weightedBed / totalWeight };
+    if (w <= 0) return null;
+    return { eased: Math.min(1, w), bed: wbed / w, level: wlev / w };
 }
 
-// Picks 2 lake sites and a gently meandering river connecting them. Must run
-// (via the load task) before anything calls getTerrainHeight/checkEnvCollision
-// for real, since both factor the result in.
+// True where a point is submerged, or within `radius`+margin of a waterline —
+// keeps structures/spawns out of the water and off the immediate wet bank.
+// Uses the actual carved waterline (terrain vs. surface), not the geometric
+// edge, so it correctly excludes the whole sloped basin.
+function waterBlocksPlacement(x, z, radius) {
+    const b = terrainWaterBlend(x, z);
+    if (!b) return false;
+    return (b.level - getTerrainHeight(x, z)) > -(SHORE_MARGIN + radius);
+}
+
+// Seeded layout: 2 lakes joined by a river, plus a handful of scattered ponds.
+// Must run (via the load task) before anything calls getTerrainHeight /
+// checkEnvCollision for real, since both factor the result in.
 function generateWaterBodies() {
-    for (let i = 0; i < 2; i++) {
-        let attempts = 0;
-        while (attempts < 60) {
-            const x = (wrand() - 0.5) * 2600, z = (wrand() - 0.5) * 2600;
-            const radius = 150 + wrand() * 90;
-            const tooClose = lakes.some(l => Math.hypot(x - l.x, z - l.z) < l.radius + radius + 500);
-            if (!tooClose) { lakes.push({ x, z, radius, level: hillHeight(x, z) - 4 }); break; } // natural ground height here, before any water exists
-            attempts++;
+    const place = (rMin, rSpan, shore, depth, spread, gap, tries) => {
+        for (let a = 0; a < tries; a++) {
+            const x = (wrand() - 0.5) * spread, z = (wrand() - 0.5) * spread;
+            const radius = rMin + wrand() * rSpan;
+            if (!lakes.some(l => Math.hypot(x - l.x, z - l.z) < l.radius + radius + gap)) {
+                lakes.push({ x, z, radius, level: hillHeight(x, z) - 4, shape: makeShape(), shore, depth });
+                return lakes[lakes.length - 1];
+            }
         }
-    }
-    if (lakes.length === 2) {
-        const [A, B] = lakes;
+        return null;
+    };
+    const A = place(150, 90, 200, 22, 2600, 500, 60);
+    const B = place(150, 90, 200, 22, 2600, 500, 60);
+    if (A && B) {
         const dx = B.x - A.x, dz = B.z - A.z, dist = Math.hypot(dx, dz) || 1;
-        const ux = dx / dist, uz = dz / dist; // unit vector A → B
-        const nx = -uz, nz = ux; // perpendicular, for a sideways wobble
-        // River runs shoreline-to-shoreline (not center-to-center) so it visibly
-        // emerges from each lake's edge instead of cutting through its middle.
+        const ux = dx / dist, uz = dz / dist, nx = -uz, nz = ux;
+        // River emerges shoreline-to-shoreline (not centre-to-centre).
         const startX = A.x + ux * A.radius, startZ = A.z + uz * A.radius;
         const endX = B.x - ux * B.radius, endZ = B.z - uz * B.radius;
         const segDx = endX - startX, segDz = endZ - startZ;
-        const N = 4, points = [];
-        // Wobble is capped relative to each leg's own length purely so the
-        // path meanders without visually folding back on itself — the terrain
-        // carve above stays continuous regardless, since it blends every leg's
-        // contribution instead of picking a single "nearest" one.
+        const N = 5, points = [];
         const legLen = Math.hypot(segDx, segDz) / N;
-        const maxWobble = Math.min(240, legLen * 0.5);
+        const maxWobble = Math.min(220, legLen * 0.5); // meander without folding back on itself
         for (let i = 0; i <= N; i++) {
             const t = i / N;
-            const wobble = (i === 0 || i === N) ? 0 : (wrand() - 0.5) * 2 * maxWobble;
-            points.push({ x: startX + segDx * t + nx * wobble, z: startZ + segDz * t + nz * wobble, level: A.level + (B.level - A.level) * t });
+            const wob = (i === 0 || i === N) ? 0 : (wrand() - 0.5) * 2 * maxWobble;
+            points.push({ x: startX + segDx * t + nx * wob, z: startZ + segDz * t + nz * wob, level: A.level + (B.level - A.level) * t });
         }
-        rivers.push({ points, width: 46 });
+        rivers.push({ points, width: 40, shore: 95, depth: 13 });
     }
+    for (let i = 0; i < 5; i++) place(40, 45, 70, 10, 4200, 260, 40); // ponds
 }
 
 function getTerrainHeight(x, z) {
@@ -799,6 +812,13 @@ function getTerrainHeight(x, z) {
     const blend = terrainWaterBlend(x, z);
     if (!blend) return h;
     return h * (1 - blend.eased) + blend.bed * blend.eased;
+}
+
+// Depth of standing water at a point (surface level − carved terrain height);
+// ≤0 on dry land. Drives the water meshes' shape and shading.
+function waterSubmergence(x, z) {
+    const b = terrainWaterBlend(x, z);
+    return b ? b.level - getTerrainHeight(x, z) : -1;
 }
 
 function getTerrainNormal(x, z) {
@@ -854,7 +874,7 @@ function getFloorHeight(x, z, currentFeetY, radius = 3) {
 }
 
 function checkEnvCollision(x, z, radius) {
-    if (nearestWaterInfluence(x, z).inside > -(SHORE_MARGIN + radius)) return true; // keep spawns/structures off the water
+    if (waterBlocksPlacement(x, z, radius)) return true; // keep spawns/structures out of the water and off the wet bank
     _tempMinVec.set(x - radius, -50, z - radius); _tempMaxVec.set(x + radius, 100, z + radius);
     _tempColBox.set(_tempMinVec, _tempMaxVec);
     for (let i = 0; i < globalColliders.length; i++) {
@@ -1095,79 +1115,145 @@ function spawnTallTower(cx, cz) {
 const loadingQueue = []; let totalTasks = 0; let completedTasks = 0;
 function addTask(name, func) { loadingQueue.push({ name, func }); totalTasks++; }
 
-// Animated water — one small shared shader, cloned per lake/river with its
-// own uniforms. Local-space x/z drives the wave phase (each mesh is built
-// centred on its own footprint), and y is displaced by that wave in the
-// vertex shader — same "geometry pre-rotated flat, then offset in Y" trick
-// the terrain plane uses.
+// Animated water. The mesh is a generous flat sheet over each body's whole
+// basin; a per-vertex "submergence" attribute (surface level − carved terrain
+// height) is what actually defines the water's outline — the fragment shader
+// discards anywhere it's ≤0, so the waterline hugs the real, irregular carved
+// bank instead of a geometric circle. Shading is what sells it: a Fresnel mix
+// toward sky reflection at grazing angles, a sharp sun glint, depth-tinted
+// body colour, and a pale foam lip along the shallow shore.
 const waterVertexShader = `
 uniform float uTime;
-varying vec2 vXZ;
-varying float vWave;
+attribute float aSub;
+varying vec3 vWorld;
+varying vec2 vP;
+varying float vSub;
+float wsum(vec2 p, float t){
+    return sin(p.x * 0.055 + t * 1.2) * 0.28
+         + sin(p.y * 0.070 - t * 1.5) * 0.22
+         + sin((p.x + p.y) * 0.045 + t * 1.9) * 0.15;
+}
 void main() {
-    vXZ = position.xz;
-    float wave = sin(position.x * 0.05 + uTime * 1.6) * 1.3
-               + sin(position.z * 0.07 - uTime * 1.1) * 0.9
-               + sin((position.x + position.z) * 0.035 + uTime * 0.8) * 0.7;
-    vWave = wave;
-    vec3 displaced = position + vec3(0.0, wave, 0.0);
-    gl_Position = projectionMatrix * modelViewMatrix * vec4(displaced, 1.0);
+    vec3 wpos = (modelMatrix * vec4(position, 1.0)).xyz;
+    float wave = wsum(wpos.xz, uTime) * clamp(aSub * 0.4, 0.0, 1.0); // flatten toward the bank
+    vec3 disp = position + vec3(0.0, wave, 0.0);
+    vWorld = (modelMatrix * vec4(disp, 1.0)).xyz;
+    vP = wpos.xz;
+    vSub = aSub;
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(disp, 1.0);
 }`;
 const waterFragmentShader = `
-uniform float uRadius;
-uniform float uIsCircular;
+uniform float uTime;
 uniform float uNightMix;
-uniform vec3 uDeepColor;
-uniform vec3 uShallowColor;
-uniform vec3 uDeepColorNight;
-uniform vec3 uShallowColorNight;
-varying vec2 vXZ;
-varying float vWave;
+uniform vec3 uSunDir, uSunColor, uDaySky, uNightSky, uDeep, uShallow;
+varying vec3 vWorld;
+varying vec2 vP;
+varying float vSub;
+float wsum(vec2 p, float t){
+    return sin(p.x * 0.055 + t * 1.2) * 0.28
+         + sin(p.y * 0.070 - t * 1.5) * 0.22
+         + sin((p.x + p.y) * 0.045 + t * 1.9) * 0.15;
+}
 void main() {
-    float edge = 1.0;
-    if (uIsCircular > 0.5) {
-        float d = length(vXZ);
-        edge = 1.0 - smoothstep(uRadius - 18.0, uRadius, d);
-        if (edge <= 0.01) discard;
-    }
-    float t = clamp(vWave * 0.12 + 0.5, 0.0, 1.0);
-    vec3 dayColor = mix(uDeepColor, uShallowColor, t);
-    vec3 nightColor = mix(uDeepColorNight, uShallowColorNight, t);
-    gl_FragColor = vec4(mix(dayColor, nightColor, uNightMix), 0.82 * edge);
+    if (vSub <= 0.0) discard; // dry land — no water here
+    // Surface normal from the wave gradient plus a fine high-freq sparkle term.
+    float e = 1.6;
+    float h0 = wsum(vP, uTime);
+    float gx = (wsum(vP + vec2(e, 0.0), uTime) - h0) / e;
+    float gz = (wsum(vP + vec2(0.0, e), uTime) - h0) / e;
+    float spark = sin(vP.x * 0.30 + uTime * 3.1) * sin(vP.y * 0.27 - uTime * 2.6);
+    vec3 N = normalize(vec3(-(gx + 0.04 * spark), 1.0, -(gz + 0.04 * spark)));
+    vec3 V = normalize(cameraPosition - vWorld);
+    float fres = pow(1.0 - max(dot(N, V), 0.0), 4.0);
+    float depthF = clamp(vSub / 20.0, 0.0, 1.0);
+    vec3 body = mix(uShallow, uDeep, depthF);
+    vec3 sky = mix(uDaySky, uNightSky, uNightMix);
+    vec3 col = mix(body, sky, clamp(fres * 0.85 + 0.10, 0.0, 1.0));
+    col = mix(col, col * 0.32, uNightMix); // dim at night
+    vec3 H = normalize(normalize(uSunDir) + V);
+    float spec = pow(max(dot(N, H), 0.0), 180.0);
+    col += spec * uSunColor * (1.0 - uNightMix * 0.65); // sun glint
+    float foam = (1.0 - smoothstep(0.0, 5.0, vSub)) * 0.35; // pale lapping edge
+    col = mix(col, vec3(0.85, 0.90, 0.92), foam);
+    float shore = smoothstep(0.0, 2.5, vSub);
+    float alpha = mix(0.62, 0.90, fres);
+    alpha = mix(alpha * 0.80, alpha, depthF) * shore; // shallows read more transparent
+    alpha = max(alpha, foam * 0.6);
+    gl_FragColor = vec4(col, alpha);
 }`;
 const waterMaterials = []; // uTime/uNightMix refreshed once per frame in animate()
-function makeWaterMaterial(isCircular, radius) {
+const _waterSunDir = new THREE.Vector3(200, 1000, -100).normalize(); // matches dirLight
+function makeWaterMaterial() {
     const mat = new THREE.ShaderMaterial({
         transparent: true, depthWrite: false, side: THREE.DoubleSide,
         uniforms: {
-            uTime: { value: 0 }, uRadius: { value: radius || 0 }, uIsCircular: { value: isCircular ? 1 : 0 },
-            uNightMix: { value: 0 },
-            uDeepColor: { value: new THREE.Color(0x1c5f7a) }, uShallowColor: { value: new THREE.Color(0x4fb0c9) },
-            uDeepColorNight: { value: new THREE.Color(0x061826) }, uShallowColorNight: { value: new THREE.Color(0x123246) },
+            uTime: { value: 0 }, uNightMix: { value: 0 },
+            uSunDir: { value: _waterSunDir }, uSunColor: { value: new THREE.Color(0xfff0d8) },
+            uDaySky: { value: new THREE.Color(0x9cc4f0) }, uNightSky: { value: new THREE.Color(0x10203a) },
+            uDeep: { value: new THREE.Color(0x0d3a55) }, uShallow: { value: new THREE.Color(0x3a86a6) },
         },
         vertexShader: waterVertexShader, fragmentShader: waterFragmentShader,
     });
     waterMaterials.push(mat);
     return mat;
 }
-function buildLakeMesh(lake) {
-    const size = lake.radius * 2 + 50;
-    const geo = new THREE.PlaneGeometry(size, size, 24, 24); geo.rotateX(-Math.PI / 2);
-    const mesh = new THREE.Mesh(geo, makeWaterMaterial(true, lake.radius));
-    mesh.position.set(lake.x, lake.level, lake.z);
+// Radial disc covering the whole lake/pond basin; the submergence attribute
+// (not the disc edge) defines the visible water, so a plain circular disc is
+// fine even for an irregular lake.
+function buildLakeMesh(l) {
+    const RINGS = 16, SEGS = 72;
+    // Water for this body only exists where dist < er + shore, and er never
+    // exceeds radius*~1.63 (the max of shapeFactor). Size the disc past that so
+    // it always fully covers the carved waterline, whatever the shape/ground.
+    const maxR = l.radius * 1.7 + l.shore + 10;
+    const pos = [0, 0, 0], sub = [waterSubmergence(l.x, l.z)], idx = [];
+    for (let ri = 1; ri <= RINGS; ri++) for (let si = 0; si < SEGS; si++) {
+        const ang = si / SEGS * Math.PI * 2, rr = (ri / RINGS) * maxR;
+        const lx = Math.cos(ang) * rr, lz = Math.sin(ang) * rr;
+        pos.push(lx, 0, lz); sub.push(waterSubmergence(l.x + lx, l.z + lz));
+    }
+    for (let si = 0; si < SEGS; si++) idx.push(0, 1 + si, 1 + (si + 1) % SEGS);
+    for (let ri = 1; ri < RINGS; ri++) for (let si = 0; si < SEGS; si++) {
+        const c = 1 + (ri - 1) * SEGS + si, n = 1 + (ri - 1) * SEGS + (si + 1) % SEGS;
+        const c2 = 1 + ri * SEGS + si, n2 = 1 + ri * SEGS + (si + 1) % SEGS;
+        idx.push(c, c2, n2, c, n2, n);
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    geo.setAttribute('aSub', new THREE.Float32BufferAttribute(sub, 1));
+    geo.setIndex(idx);
+    const mesh = new THREE.Mesh(geo, makeWaterMaterial());
+    mesh.position.set(l.x, l.level, l.z); mesh.renderOrder = 2;
     scene.add(mesh);
 }
-function buildRiverMesh(river) {
-    // One quad per leg of the polyline — each leg's own two endpoint levels
-    // (not a global average) so the visible surface matches the continuous
-    // carve exactly at every joint.
-    for (let i = 0; i < river.points.length - 1; i++) {
-        const p0 = river.points[i], p1 = river.points[i + 1];
+// River: a generous ribbon per leg (world-space verts), again shaped by the
+// submergence attribute so it fills only the actual carved channel.
+function buildRiverMesh(r) {
+    // Water only exists within width/2 + shore of the leg, so extend past that.
+    const half = r.width / 2 + r.shore + 10, ACROSS = 10;
+    for (let s = 0; s < r.points.length - 1; s++) {
+        const p0 = r.points[s], p1 = r.points[s + 1];
         const dx = p1.x - p0.x, dz = p1.z - p0.z, len = Math.hypot(dx, dz) || 1;
-        const geo = new THREE.PlaneGeometry(river.width, len, 2, Math.max(2, Math.round(len / 40))); geo.rotateX(-Math.PI / 2);
-        const mesh = new THREE.Mesh(geo, makeWaterMaterial(false, 0));
-        mesh.position.set((p0.x + p1.x) / 2, (p0.level + p1.level) / 2, (p0.z + p1.z) / 2);
-        mesh.rotation.y = Math.atan2(dx, dz);
+        const nx = -dz / len, nz = dx / len; // across the flow
+        const along = Math.max(2, Math.round(len / 30)), stride = ACROSS + 1;
+        const pos = [], sub = [], idx = [];
+        for (let a = 0; a <= along; a++) {
+            const ta = a / along, cx = p0.x + dx * ta, cz = p0.z + dz * ta, lev = p0.level + (p1.level - p0.level) * ta;
+            for (let w = 0; w <= ACROSS; w++) {
+                const off = (w / ACROSS - 0.5) * 2 * half, wx = cx + nx * off, wz = cz + nz * off;
+                pos.push(wx, lev, wz); sub.push(waterSubmergence(wx, wz));
+            }
+        }
+        for (let a = 0; a < along; a++) for (let w = 0; w < ACROSS; w++) {
+            const c = a * stride + w, n = c + 1, c2 = c + stride, n2 = c2 + 1;
+            idx.push(c, c2, n2, c, n2, n);
+        }
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+        geo.setAttribute('aSub', new THREE.Float32BufferAttribute(sub, 1));
+        geo.setIndex(idx);
+        const mesh = new THREE.Mesh(geo, makeWaterMaterial());
+        mesh.renderOrder = 2; // verts already in world space, mesh at origin
         scene.add(mesh);
     }
 }
@@ -1178,13 +1264,30 @@ addTask("Filling Lakes & Rivers", () => {
 });
 
 addTask("Sculpting Massive Terrain", () => {
-    const floorGeo = new THREE.PlaneGeometry(7000, 7000, 200, 200); floorGeo.rotateX(-Math.PI / 2);
+    const floorGeo = new THREE.PlaneGeometry(7000, 7000, 220, 220); floorGeo.rotateX(-Math.PI / 2);
     const posAttr = floorGeo.attributes.position;
+    // Per-vertex colour: grass everywhere, transitioning through dry sand and a
+    // wet-sand rim to dark lakebed mud as it drops below the waterline. Gives
+    // every lake/pond/river a natural beach instead of grass running into water.
+    const colors = new Float32Array(posAttr.count * 3);
+    const cGrass = new THREE.Color(0x243020), cDry = new THREE.Color(0xb2a06b), cWet = new THREE.Color(0x8a7a4e), cMud = new THREE.Color(0x46402c);
+    const tmp = new THREE.Color();
     for (let i = 0; i < posAttr.count; i++) {
-        const vx = posAttr.getX(i); const vz = posAttr.getZ(i); posAttr.setY(i, getTerrainHeight(vx, vz));
+        const vx = posAttr.getX(i), vz = posAttr.getZ(i);
+        const y = getTerrainHeight(vx, vz); posAttr.setY(i, y);
+        const b = terrainWaterBlend(vx, vz);
+        if (b) {
+            const rel = y - b.level; // <0 submerged, >0 above the waterline
+            if (rel < 0) tmp.copy(cWet).lerp(cMud, Math.min(1, -rel / 14));
+            else if (rel < 7) tmp.copy(cWet).lerp(cDry, rel / 7);
+            else if (rel < 20) tmp.copy(cDry).lerp(cGrass, (rel - 7) / 13);
+            else tmp.copy(cGrass);
+        } else tmp.copy(cGrass);
+        colors[i * 3] = tmp.r; colors[i * 3 + 1] = tmp.g; colors[i * 3 + 2] = tmp.b;
     }
+    floorGeo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
     floorGeo.computeVertexNormals();
-    floor = new THREE.Mesh(floorGeo, new THREE.MeshStandardMaterial({ color: 0x243020, roughness: 0.9 }));
+    floor = new THREE.Mesh(floorGeo, new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.95 }));
     scene.add(floor); sharedBotGeometry = createMergedBotGeometry();
 });
 
